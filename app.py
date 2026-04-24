@@ -1,247 +1,174 @@
 import streamlit as st
-import pandas as pd
 import requests
-from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import xml.etree.ElementTree as ET
-from io import BytesIO
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import pandas as pd
 
-st.set_page_config(page_title="IA Audit Tool", layout="wide")
-st.title("🚀 IA Audit Tool (Advanced)")
+st.set_page_config(page_title="Website Audit Tool", layout="wide")
 
-# -------------------------------
-# Safe Imports
-# -------------------------------
-BS4_AVAILABLE, DOCX_AVAILABLE, EXCEL_AVAILABLE = True, True, True
+# -----------------------------
+# Utility Functions
+# -----------------------------
 
-try:
-    from bs4 import BeautifulSoup
-except:
-    BS4_AVAILABLE = False
+def normalize_url(url):
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip('/').lower()
 
-try:
-    from docx import Document
-except:
-    DOCX_AVAILABLE = False
 
-try:
-    import openpyxl
-except:
-    EXCEL_AVAILABLE = False
+def crawl_site(start_url, max_pages=50):
+    visited = set()
+    to_visit = [start_url]
+    data = []
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-# -------------------------------
-# Sidebar
-# -------------------------------
-st.sidebar.header("⚙️ Settings")
-threads = st.sidebar.slider("Parallel Threads", 5, 30, 15)
-
-# -------------------------------
-# Inputs
-# -------------------------------
-uploaded_file = st.file_uploader("Upload URL file", type=["csv", "xlsx"])
-sitemap_url = st.text_input("Optional Sitemap URL (for orphan detection)")
-
-# -------------------------------
-# Helpers
-# -------------------------------
-def load_file(file):
-    return pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
-
-def normalize(df):
-    df.columns = [str(c).lower() for c in df.columns]
-    for col in df.columns:
-        if col in ["url", "link"]:
-            return df[[col]].rename(columns={col: "URL"})
-    return df.iloc[:, [0]].rename(columns={df.columns[0]: "URL"})
-
-def enrich(df):
-    df["path"] = df["URL"].apply(lambda x: urlparse(x).path)
-    df["depth"] = df["path"].apply(lambda x: len([p for p in x.split("/") if p]))
-    df["section"] = df["path"].apply(
-        lambda x: x.split("/")[1] if len(x.split("/")) > 1 else "root"
-    )
-    return df
-
-def fetch(url):
-    try:
-        r = requests.get(url, timeout=5, headers=HEADERS)
-        title = ""
-        if BS4_AVAILABLE:
-            soup = BeautifulSoup(r.text, "lxml")
-            title = soup.title.string.strip() if soup.title else ""
-        return r.status_code, r.url, title
-    except:
-        return None, None, ""
-
-def crawl(df):
-    urls = df["URL"].tolist()
-    status, final, title = [None]*len(urls), [None]*len(urls), [""]*len(urls)
+    domain = urlparse(start_url).netloc
 
     progress = st.progress(0)
 
-    with ThreadPoolExecutor(max_workers=threads) as exe:
-        futures = {exe.submit(fetch, u): i for i, u in enumerate(urls)}
+    while to_visit and len(visited) < max_pages:
+        url = to_visit.pop(0)
+        url = normalize_url(url)
 
-        for i, f in enumerate(as_completed(futures)):
-            idx = futures[f]
-            s, fu, t = f.result()
-            status[idx], final[idx], title[idx] = s, fu, t
-            progress.progress((i+1)/len(urls))
+        if url in visited:
+            continue
 
-    df["status"], df["final_url"], df["title"] = status, final, title
-    return df
+        try:
+            response = requests.get(url, timeout=5)
+            visited.add(url)
 
-def get_sitemap(url):
-    try:
-        r = requests.get(url)
-        root = ET.fromstring(r.content)
-        return set([e.text for e in root.iter() if "loc" in e.tag])
-    except:
-        return set()
+            soup = BeautifulSoup(response.text, "html.parser")
+            links = []
 
-# -------------------------------
-# Metrics
-# -------------------------------
-def compute_metrics(df, sitemap):
-    total = len(df)
-    unique = df["URL"].nunique()
-    duplicates = total - unique
+            for a in soup.find_all("a", href=True):
+                link = urljoin(url, a["href"])
+                parsed = urlparse(link)
 
-    dup_titles_df = df[df["title"].duplicated(keep=False)]
+                if parsed.netloc == domain:
+                    clean_link = normalize_url(link)
+                    links.append(clean_link)
 
-    section_counts = df["section"].value_counts()
-    section_pct = (section_counts / total * 100).round(2)
+                    if clean_link not in visited and clean_link not in to_visit:
+                        to_visit.append(clean_link)
 
-    deep_pct = round((df[df["depth"] > 4].shape[0] / total) * 100, 2)
+            title = soup.title.string.strip() if soup.title and soup.title.string else ""
 
-    # Orphan pages
-    if sitemap:
-        orphan_urls = list(set(sitemap) - set(df["URL"]))
-        orphan_pct = round((len(orphan_urls) / len(sitemap)) * 100, 2)
-    else:
-        orphan_urls, orphan_pct = [], "N/A"
+            data.append({
+                "url": url,
+                "status": response.status_code,
+                "title": title,
+                "internal_links": links,
+                "link_count": len(links)
+            })
 
-    metrics = {
-        "Total Pages": total,
-        "% Duplicate URLs": round((duplicates/total)*100,2) if total else 0,
-        "% Duplicate Titles": round((len(dup_titles_df)/total)*100,2),
-        "Avg Depth": round(df["depth"].mean(),2),
-        "% Pages > Depth 4": deep_pct,
-        "Broken Pages": df[df["status"]>=400].shape[0],
-        "Redirects": df[df["status"].between(300,399)].shape[0],
-        "% Orphan Pages": orphan_pct
-    }
+        except Exception as e:
+            data.append({
+                "url": url,
+                "status": "error",
+                "title": "",
+                "internal_links": [],
+                "link_count": 0
+            })
 
-    return metrics, section_counts, section_pct, dup_titles_df, orphan_urls
+        progress.progress(len(visited) / max_pages)
 
-# -------------------------------
-# Narrative Summary
-# -------------------------------
-def generate_summary(metrics, section_pct):
-    return f"""
-### IA Audit Summary
+    return pd.DataFrame(data)
 
-- Total Pages: {metrics['Total Pages']}
-- Duplicate Content: ~{metrics['% Duplicate URLs']}%
-- Average Depth: {metrics['Avg Depth']}
-- Deep Pages (>4 levels): {metrics['% Pages > Depth 4']}%
 
-### Navigation Health
-- Orphan Pages: {metrics['% Orphan Pages']}%
-- Broken Pages: {metrics['Broken Pages']}
-- Redirects: {metrics['Redirects']}
+def find_orphans(df):
+    all_pages = set(df['url'])
+    linked_pages = set()
 
-### Content Distribution (%)
-{section_pct.to_string()}
+    for links in df['internal_links']:
+        linked_pages.update(links)
 
-### Key Observations
-- High duplication indicates structural inefficiencies
-- Deep navigation reduces discoverability
-- Fragmented entry points likely exist
+    return list(all_pages - linked_pages)
 
-### Recommendation
-- Move to entity-driven architecture
-- Reduce duplication via centralized content
-- Improve navigation depth and structure
-"""
 
-# -------------------------------
-# Reports
-# -------------------------------
-def build_excel(df, metrics, sections):
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, "Raw Data", index=False)
-        pd.DataFrame(metrics.items(), columns=["Metric","Value"]).to_excel(writer, "Metrics", index=False)
-        sections.to_frame("Count").to_excel(writer, "Sections")
-    buffer.seek(0)
-    return buffer
+# -----------------------------
+# UI Layout
+# -----------------------------
 
-def build_word(metrics, sections, summary):
-    doc = Document()
-    doc.add_heading("IA Audit Report", 0)
+st.title("🌐 Website Audit & Crawler Tool")
 
-    doc.add_heading("Executive Summary", 1)
-    doc.add_paragraph(summary)
+with st.sidebar:
+    st.header("Crawl Settings")
+    start_url = st.text_input("Website URL", placeholder="https://example.com")
+    max_pages = st.slider("Max Pages to Crawl", 10, 200, 50)
+    start_crawl = st.button("Start Crawl")
 
-    doc.add_heading("Metrics", 1)
-    for k,v in metrics.items():
-        doc.add_paragraph(f"{k}: {v}")
+# Session state to persist data
+if "data" not in st.session_state:
+    st.session_state.data = None
 
-    doc.add_heading("Section Distribution", 1)
-    for s,c in sections.items():
-        doc.add_paragraph(f"{s}: {c}")
+# -----------------------------
+# Crawl Execution
+# -----------------------------
 
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+if start_crawl and start_url:
+    with st.spinner("Crawling website..."):
+        df = crawl_site(start_url, max_pages)
+        st.session_state.data = df
+    st.success("Crawl completed!")
 
-# -------------------------------
-# MAIN FLOW
-# -------------------------------
-if uploaded_file:
-    df = normalize(load_file(uploaded_file)).dropna()
-    df = enrich(df)
+# -----------------------------
+# Tabs
+# -----------------------------
 
-    st.info("⚡ Running parallel crawl...")
-    df = crawl(df)
+if st.session_state.data is not None:
+    df = st.session_state.data
 
-    sitemap = get_sitemap(sitemap_url) if sitemap_url else set()
+    tab1, tab2, tab3, tab4 = st.tabs(["Crawled Data", "Reports", "Orphan Pages", "Errors"])
 
-    metrics, sections, section_pct, dup_titles_df, orphan_urls = compute_metrics(df, sitemap)
-    summary = generate_summary(metrics, section_pct)
-
-    # -------------------------------
-    # UI Tabs
-    # -------------------------------
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard","🔍 Insights","📁 Data","⬇️ Reports"])
-
+    # -------------------------
+    # Tab 1: Data
+    # -------------------------
     with tab1:
-        cols = st.columns(len(metrics))
-        for i,(k,v) in enumerate(metrics.items()):
-            cols[i].metric(k,v)
-
-        st.bar_chart(section_pct)
-
-    with tab2:
-        st.markdown(summary)
-
-        st.subheader("Duplicate Pages (Title Level)")
-        st.dataframe(dup_titles_df[["URL","title"]].head(50))
-
-        if orphan_urls:
-            st.subheader("Orphan Pages")
-            st.dataframe(pd.DataFrame(orphan_urls, columns=["URL"]).head(50))
-
-    with tab3:
+        st.subheader("Crawled Pages")
         st.dataframe(df)
 
-    with tab4:
-        if EXCEL_AVAILABLE:
-            st.download_button("Download Excel Report", build_excel(df, metrics, sections), "IA_Report.xlsx")
+    # -------------------------
+    # Tab 2: Reports
+    # -------------------------
+    with tab2:
+        st.subheader("Summary Report")
 
-        if DOCX_AVAILABLE:
-            st.download_button("Download Word Report", build_word(metrics, sections, summary), "IA_Report.docx")
+        total_pages = len(df)
+        error_pages = len(df[df['status'] != 200])
+        avg_links = df['link_count'].mean()
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric("Total Pages", total_pages)
+        col2.metric("Error Pages", error_pages)
+        col3.metric("Avg Internal Links", round(avg_links, 2) if not pd.isna(avg_links) else 0)
+
+    # -------------------------
+    # Tab 3: Orphans
+    # -------------------------
+    with tab3:
+        st.subheader("Orphan Pages")
+
+        orphans = find_orphans(df)
+
+        st.write(f"Total Orphan Pages: {len(orphans)}")
+
+        if orphans:
+            orphan_df = pd.DataFrame(orphans, columns=["url"])
+            st.dataframe(orphan_df)
+        else:
+            st.info("No orphan pages detected")
+
+    # -------------------------
+    # Tab 4: Errors
+    # -------------------------
+    with tab4:
+        st.subheader("Error Pages")
+
+        error_df = df[df['status'] != 200]
+
+        if not error_df.empty:
+            st.dataframe(error_df)
+        else:
+            st.info("No errors found")
+
+else:
+    st.info("Enter a URL and start crawling to see results.")
