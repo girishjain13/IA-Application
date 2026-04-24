@@ -2,120 +2,215 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-from collections import deque
 from io import BytesIO
 from docx import Document
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="IA Audit Tool (Crawler)", layout="wide")
 
 # -----------------------------
-# CRAWLER (NO HARD LIMIT)
+# FETCH LINKS (THREAD WORKER)
 # -----------------------------
-def crawl_site(start_url):
+def fetch_links(url, domain):
+    links = set()
+
+    try:
+        res = requests.get(url, timeout=5)
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        for link in soup.find_all("a", href=True):
+            absolute = urljoin(url, link['href'])
+            parsed = urlparse(absolute)
+
+            if parsed.netloc == domain:
+                clean = parsed.scheme + "://" + parsed.netloc + parsed.path
+                links.add(clean)
+
+    except:
+        pass
+
+    return url, links
+
+
+# -----------------------------
+# PARALLEL CRAWLER
+# -----------------------------
+def crawl_site(start_url, max_workers=15):
     visited = set()
     edges = []
-    queue = deque([start_url])
+    queue = {start_url}
 
     domain = urlparse(start_url).netloc
 
+    progress = st.empty()
+
     while queue:
-        url = queue.popleft()
+        batch = list(queue)
+        queue.clear()
 
-        if url in visited:
-            continue
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_links, url, domain) for url in batch]
 
-        visited.add(url)
+            for future in as_completed(futures):
+                url, links = future.result()
 
-        try:
-            res = requests.get(url, timeout=5)
-            soup = BeautifulSoup(res.text, "html.parser")
-
-            for link in soup.find_all("a", href=True):
-                absolute = urljoin(url, link['href'])
-                parsed = urlparse(absolute)
-
-                # stay within domain
-                if parsed.netloc != domain:
+                if url in visited:
                     continue
 
-                clean_url = parsed.scheme + "://" + parsed.netloc + parsed.path
+                visited.add(url)
 
-                edges.append((url, clean_url))
+                for link in links:
+                    edges.append((url, link))
 
-                if clean_url not in visited:
-                    queue.append(clean_url)
+                    if link not in visited:
+                        queue.add(link)
 
-        except:
-            continue
+        progress.write(f"🔄 Crawled Pages: {len(visited)}")
 
     return visited, edges
 
+
 # -----------------------------
-# METRICS
+# METRICS ENGINE
 # -----------------------------
 def calculate_metrics(pages, edges):
-    df_edges = pd.DataFrame(edges, columns=["from", "to"])
+    df_edges = pd.DataFrame(edges, columns=["From", "To"])
 
-    linked_pages = set(df_edges['to'])
+    linked_pages = set(df_edges["To"])
     orphan_pages = set(pages) - linked_pages
 
-    depths = {list(pages)[0]: 0}
+    # Depth calculation (BFS)
+    depth_map = {}
+    start = list(pages)[0]
+    depth_map[start] = 0
 
-    # BFS depth calc
     for frm, to in edges:
-        if frm in depths:
-            depths[to] = depths[frm] + 1
+        if frm in depth_map:
+            depth_map[to] = depth_map[frm] + 1
 
-    avg_depth = sum(depths.values()) / len(depths) if depths else 0
+    avg_depth = sum(depth_map.values()) / len(depth_map) if depth_map else 0
 
     metrics = {
         "Total Pages": len(pages),
+        "Total Links": len(edges),
         "Orphan Pages": len(orphan_pages),
-        "% Orphan Pages": round((len(orphan_pages)/len(pages))*100,2),
-        "Avg Depth": round(avg_depth,2)
+        "% Orphan Pages": round((len(orphan_pages)/len(pages))*100, 2) if pages else 0,
+        "Avg Depth": round(avg_depth, 2)
     }
 
-    return metrics, orphan_pages
+    return metrics, orphan_pages, df_edges
+
+
+# -----------------------------
+# INSIGHTS ENGINE
+# -----------------------------
+def generate_insights(metrics):
+    insights = []
+
+    if metrics["% Orphan Pages"] > 30:
+        insights.append("High orphan pages indicate weak internal linking structure.")
+
+    if metrics["Avg Depth"] > 4:
+        insights.append("Deep navigation increases user effort and impacts UX.")
+
+    if metrics["Total Pages"] > 5000:
+        insights.append("Large site size may require structured IA governance.")
+
+    if not insights:
+        insights.append("IA structure appears reasonably healthy.")
+
+    return insights
+
+
+# -----------------------------
+# EXCEL REPORT
+# -----------------------------
+def generate_excel(pages, edges, metrics):
+    output = BytesIO()
+
+    df_pages = pd.DataFrame({"Pages": list(pages)})
+    df_edges = pd.DataFrame(edges, columns=["From", "To"])
+    df_metrics = pd.DataFrame(list(metrics.items()), columns=["Metric", "Value"])
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_metrics.to_excel(writer, sheet_name="Dashboard", index=False)
+        df_pages.to_excel(writer, sheet_name="Pages", index=False)
+        df_edges.to_excel(writer, sheet_name="Link Graph", index=False)
+
+    output.seek(0)
+    return output
+
 
 # -----------------------------
 # WORD REPORT
 # -----------------------------
-def generate_word(metrics):
+def generate_word(metrics, insights):
     doc = Document()
+
     doc.add_heading("IA Audit Report", 0)
 
+    doc.add_heading("Executive Summary", 1)
+    doc.add_paragraph(
+        "This report is based on a full crawl of the website, analyzing link structure and navigation depth."
+    )
+
+    doc.add_heading("Metrics", 1)
     for k, v in metrics.items():
         doc.add_paragraph(f"{k}: {v}")
+
+    doc.add_heading("Key Insights", 1)
+    for i in insights:
+        doc.add_paragraph(f"• {i}")
+
+    doc.add_heading("Recommendations", 1)
+    doc.add_paragraph("• Improve internal linking to reduce orphan pages")
+    doc.add_paragraph("• Flatten navigation structure")
+    doc.add_paragraph("• Introduce structured IA governance")
 
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
+
 # -----------------------------
 # UI
 # -----------------------------
-st.title("🌐 Full Site IA Crawler")
+st.title("🌐 IA Audit Tool (Full Crawler Version)")
 
-url = st.text_input("Enter Website URL")
+url = st.text_input("Enter Website URL (include https://)")
+
+workers = st.slider("Crawl Speed (Threads)", 5, 25, 12)
 
 if st.button("Start Crawl"):
 
-    with st.spinner("Crawling entire site... this may take time"):
+    if not url:
+        st.warning("Please enter a URL")
+    else:
+        with st.spinner("Crawling site..."):
+            pages, edges = crawl_site(url, max_workers=workers)
 
-        pages, edges = crawl_site(url)
-        metrics, orphan_pages = calculate_metrics(pages, edges)
+        metrics, orphan_pages, df_edges = calculate_metrics(pages, edges)
+        insights = generate_insights(metrics)
 
-    st.subheader("📊 Metrics")
-    st.json(metrics)
+        st.subheader("📊 Metrics")
+        st.json(metrics)
 
-    st.subheader("🔗 Total Pages Crawled")
-    st.write(len(pages))
+        st.subheader("💡 Insights")
+        for i in insights:
+            st.write("•", i)
 
-    st.subheader("⚠️ Orphan Pages")
-    st.write(len(orphan_pages))
+        st.subheader("⚠️ Orphan Pages")
+        st.write(len(orphan_pages))
 
-    word = generate_word(metrics)
+        st.subheader("📄 Sample Data")
+        st.dataframe(df_edges.head(100))
 
-    st.download_button("Download Report", word, "IA_Report.docx")
+        st.subheader("📥 Download Reports")
+
+        excel = generate_excel(pages, edges, metrics)
+        st.download_button("Download Excel Report", excel, "IA_Report.xlsx")
+
+        word = generate_word(metrics, insights)
+        st.download_button("Download Word Report", word, "IA_Report.docx")
