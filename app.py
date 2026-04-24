@@ -1,7 +1,10 @@
+
+
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 
-st.set_page_config(page_title="Website Audit Tool", layout="wide")
+st.set_page_config(page_title="IA Audit Tool", layout="wide")
 
 # -----------------------------
 # Utility Functions
@@ -13,83 +16,102 @@ def normalize_url(url):
     return url.strip().rstrip('/').lower()
 
 
-def find_orphans(df):
-    if 'url' not in df.columns or 'linked_from' not in df.columns:
-        return []
+def calculate_metrics(df):
+    metrics = {}
 
-    all_pages = set(df['url'].apply(normalize_url))
-    linked_pages = set(df['linked_from'].dropna().apply(normalize_url))
+    # Core Metrics
+    metrics['Total Pages'] = len(df)
+    metrics['Unique URLs'] = df['url'].nunique() if 'url' in df.columns else 0
+    metrics['Duplicate Pages %'] = round((1 - metrics['Unique URLs']/metrics['Total Pages'])*100, 2) if metrics['Total Pages'] else 0
 
-    orphan_pages = all_pages - linked_pages
-    return list(orphan_pages)
+    # Navigation
+    if 'in_nav' in df.columns:
+        metrics['% Pages in Navigation'] = round(df['in_nav'].mean()*100, 2)
+        metrics['Pages not in Navigation'] = len(df[df['in_nav'] == False])
+    else:
+        metrics['% Pages in Navigation'] = 'N/A'
+        metrics['Pages not in Navigation'] = 'N/A'
+
+    # Orphans
+    if 'linked_from' in df.columns:
+        all_pages = set(df['url'].apply(normalize_url))
+        linked_pages = set(df['linked_from'].dropna().apply(normalize_url))
+        orphan_pages = all_pages - linked_pages
+        metrics['Orphan Pages'] = len(orphan_pages)
+        metrics['% Orphan Pages'] = round((len(orphan_pages)/len(all_pages))*100, 2) if all_pages else 0
+    else:
+        metrics['Orphan Pages'] = 'N/A'
+        metrics['% Orphan Pages'] = 'N/A'
+
+    # Depth
+    if 'depth' in df.columns:
+        metrics['Avg Depth'] = round(df['depth'].mean(), 2)
+        metrics['Max Depth'] = df['depth'].max()
+    else:
+        metrics['Avg Depth'] = 'N/A'
+        metrics['Max Depth'] = 'N/A'
+
+    # Content Health
+    if 'status' in df.columns:
+        metrics['% Error Pages'] = round((len(df[df['status'] != 200])/len(df))*100, 2)
+    else:
+        metrics['% Error Pages'] = 'N/A'
+
+    if 'owner' in df.columns:
+        metrics['Pages without Owner'] = len(df[df['owner'].isna()])
+    else:
+        metrics['Pages without Owner'] = 'N/A'
+
+    return metrics
+
+
+def generate_excel(df, metrics):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Raw Data', index=False)
+        pd.DataFrame(list(metrics.items()), columns=['Metric','Value']).to_excel(writer, sheet_name='Summary', index=False)
+    return output.getvalue()
+
 
 # -----------------------------
-# UI Layout
+# UI
 # -----------------------------
 
-st.title("📊 Website Audit Tool (CSV आधारित)")
+st.title("📊 IA Audit & Reporting Tool")
 
-st.write("Upload your crawl or URL dataset to generate reports and identify orphan pages.")
-
-uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
-
-# -----------------------------
-# Processing
-# -----------------------------
+uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
 if uploaded_file:
-    try:
-        df = pd.read_csv(uploaded_file)
+    df = pd.read_csv(uploaded_file)
 
-        st.success("File uploaded successfully!")
+    if 'url' in df.columns:
+        df['url'] = df['url'].apply(normalize_url)
 
-        # Normalize URLs
-        if 'url' in df.columns:
-            df['url'] = df['url'].apply(normalize_url)
+    metrics = calculate_metrics(df)
 
-        tab1, tab2, tab3 = st.tabs(["Data", "Reports", "Orphan Pages"])
+    tab1, tab2, tab3 = st.tabs(["Data","Metrics","Download Reports"])
 
-        # -------------------------
-        # Tab 1: Data
-        # -------------------------
-        with tab1:
-            st.subheader("Uploaded Data")
-            st.dataframe(df)
+    # Data
+    with tab1:
+        st.dataframe(df)
 
-        # -------------------------
-        # Tab 2: Reports
-        # -------------------------
-        with tab2:
-            st.subheader("Summary Report")
+    # Metrics
+    with tab2:
+        st.subheader("IA Metrics")
+        for k,v in metrics.items():
+            st.write(f"**{k}:** {v}")
 
-            total_pages = len(df)
+    # Download
+    with tab3:
+        st.subheader("Download Reports")
 
-            col1, col2 = st.columns(2)
-            col1.metric("Total Pages", total_pages)
-            col2.metric("Columns", len(df.columns))
-
-        # -------------------------
-        # Tab 3: Orphan Pages
-        # -------------------------
-        with tab3:
-            st.subheader("Orphan Pages")
-
-            if 'linked_from' not in df.columns:
-                st.warning("Column 'linked_from' not found. Unable to calculate orphan pages.")
-                st.info("Expected columns: 'url' and 'linked_from'")
-            else:
-                orphans = find_orphans(df)
-
-                st.write(f"Total Orphan Pages: {len(orphans)}")
-
-                if orphans:
-                    orphan_df = pd.DataFrame(orphans, columns=["url"])
-                    st.dataframe(orphan_df)
-                else:
-                    st.info("No orphan pages detected")
-
-    except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
+        excel_file = generate_excel(df, metrics)
+        st.download_button(
+            label="Download Excel Report",
+            data=excel_file,
+            file_name="IA_Audit_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 else:
-    st.info("Please upload a CSV file to begin analysis.")
+    st.info("Upload CSV to generate IA audit metrics.")
