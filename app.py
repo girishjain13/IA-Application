@@ -16,39 +16,31 @@ def normalize_url(url):
 def auto_map_columns(df):
     df.columns = [col.strip().lower() for col in df.columns]
 
-    mapping = {}
     for col in df.columns:
         if 'url' in col or 'address' in col:
-            mapping[col] = 'url'
-        elif 'link' in col:
-            mapping[col] = 'linked_from'
-        elif 'nav' in col:
-            mapping[col] = 'in_nav'
-        elif 'depth' in col:
-            mapping[col] = 'depth'
-
-    df.rename(columns=mapping, inplace=True)
+            df.rename(columns={col: 'url'}, inplace=True)
+            break
 
     if 'url' not in df.columns:
-        original = df.columns[0]
-        df.rename(columns={original: 'url'}, inplace=True)
-        st.warning(f"No URL column found. Using '{original}' as URL.")
+        first_col = df.columns[0]
+        df.rename(columns={first_col: 'url'}, inplace=True)
+        st.warning(f"No URL column found. Using '{first_col}' as URL.")
 
     return df
 
 # -----------------------------
-# INFERENCE ENGINE
+# INFERENCE
 # -----------------------------
 def infer_data(df):
     msgs = []
 
     if 'depth' not in df.columns:
         df['depth'] = df['url'].apply(lambda x: x.count('/'))
-        msgs.append("Depth inferred from URL")
+        msgs.append("Depth inferred")
 
     if 'in_nav' not in df.columns:
         df['in_nav'] = df['depth'] <= 2
-        msgs.append("Navigation inferred from depth")
+        msgs.append("Navigation inferred")
 
     if 'linked_from' not in df.columns:
         df['linked_from'] = df['url'].apply(
@@ -69,7 +61,6 @@ def calculate_metrics(df):
 
     metrics['Total Pages'] = total
     metrics['Duplicate Pages %'] = round((1 - unique/total)*100, 2) if total else 0
-
     metrics['% Pages in Navigation'] = round(df['in_nav'].astype(int).mean()*100, 2)
 
     all_pages = set(df['url'])
@@ -77,7 +68,6 @@ def calculate_metrics(df):
     orphan = all_pages - linked
 
     metrics['% Orphan Pages'] = round((len(orphan)/len(all_pages))*100, 2) if all_pages else 0
-
     metrics['Avg Depth'] = round(df['depth'].mean(), 2)
 
     df['section'] = df['url'].apply(lambda x:
@@ -99,19 +89,19 @@ def generate_insights(metrics):
     insights = []
 
     if metrics['Duplicate Pages %'] > 50:
-        insights.append("High duplication indicates inefficient content structure.")
+        insights.append("High duplication indicates inefficient IA structure.")
 
     if metrics['% Orphan Pages'] > 30:
-        insights.append("Large number of orphan pages reduces discoverability.")
+        insights.append("High orphan pages reduce discoverability.")
 
     if metrics['Avg Depth'] > 4:
-        insights.append("Deep navigation increases user effort.")
+        insights.append("Deep navigation impacts usability.")
 
     if metrics['% Pages in Navigation'] < 60:
-        insights.append("Low navigation coverage indicates fragmented IA.")
+        insights.append("Low navigation coverage suggests poor IA.")
 
     if not insights:
-        insights.append("IA structure appears relatively healthy.")
+        insights.append("IA structure appears healthy.")
 
     return insights
 
@@ -120,16 +110,12 @@ def generate_insights(metrics):
 # -----------------------------
 def generate_word(metrics, insights, section_dist):
     doc = Document()
-
-    doc.add_heading('Website IA Audit Report', 0)
+    doc.add_heading('IA Audit Report', 0)
 
     doc.add_heading('1. Overview', 1)
-    doc.add_paragraph(
-        "This report evaluates the website's information architecture "
-        "based on structure, navigation, and content distribution."
-    )
+    doc.add_paragraph("This report evaluates the website information architecture.")
 
-    doc.add_heading('2. Core Metrics', 1)
+    doc.add_heading('2. Metrics', 1)
     for k, v in metrics.items():
         doc.add_paragraph(f"{k}: {v}")
 
@@ -137,15 +123,14 @@ def generate_word(metrics, insights, section_dist):
     for sec, val in section_dist.items():
         doc.add_paragraph(f"{sec}: {val}%")
 
-    doc.add_heading('4. Key Insights', 1)
+    doc.add_heading('4. Insights', 1)
     for i in insights:
         doc.add_paragraph(f"• {i}")
 
     doc.add_heading('5. Recommendations', 1)
-    doc.add_paragraph("• Reduce duplication through reusable content models")
-    doc.add_paragraph("• Improve internal linking strategy")
-    doc.add_paragraph("• Simplify navigation structure")
-    doc.add_paragraph("• Establish governance and ownership")
+    doc.add_paragraph("• Reduce duplication via structured content models")
+    doc.add_paragraph("• Improve internal linking")
+    doc.add_paragraph("• Simplify navigation hierarchy")
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -153,19 +138,17 @@ def generate_word(metrics, insights, section_dist):
     return buffer
 
 # -----------------------------
-# EXCEL (STABLE)
+# EXCEL (XLSXWRITER ONLY)
 # -----------------------------
 def generate_excel(df, metrics, section_dist):
     output = BytesIO()
 
-    # Safe data
-    if df is None or df.empty:
-        df = pd.DataFrame({"Message": ["No data available"]})
+    df = df.astype(str)
 
-    dashboard_df = pd.DataFrame([
-        {"Metric": str(k), "Value": str(v)}
-        for k, v in metrics.items()
-    ])
+    dashboard_df = pd.DataFrame({
+        "Metric": list(metrics.keys()),
+        "Value": [str(v) for v in metrics.values()]
+    })
 
     if section_dist is None or len(section_dist) == 0:
         section_df = pd.DataFrame({
@@ -174,20 +157,27 @@ def generate_excel(df, metrics, section_dist):
         })
     else:
         section_df = pd.DataFrame({
-            "Section": section_dist.index.astype(str),
-            "Percentage": section_dist.values
+            "Section": list(section_dist.index),
+            "Percentage": list(section_dist.values)
         })
 
-    # Write safely
-    try:
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            dashboard_df.to_excel(writer, "Dashboard", index=False)
-            section_df.to_excel(writer, "Sections", index=False)
-            df.to_excel(writer, "Raw Data", index=False)
-    except Exception as e:
-        fallback = pd.DataFrame({"Error": [str(e)]})
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            fallback.to_excel(writer, "Error", index=False)
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+
+        # Always create first sheet
+        pd.DataFrame({"Status": ["IA Report Generated"]}).to_excel(
+            writer, sheet_name="Summary", index=False
+        )
+
+        dashboard_df.to_excel(writer, sheet_name="Metrics", index=False)
+        section_df.to_excel(writer, sheet_name="Sections", index=False)
+        df.to_excel(writer, sheet_name="Raw Data", index=False)
+
+        # Basic formatting
+        workbook  = writer.book
+        worksheet = writer.sheets['Metrics']
+
+        bold = workbook.add_format({'bold': True})
+        worksheet.set_row(0, None, bold)
 
     output.seek(0)
     return output
@@ -195,7 +185,7 @@ def generate_excel(df, metrics, section_dist):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("📊 IA Audit Tool (Stable Version)")
+st.title("📊 IA Audit Tool (Final Stable Version)")
 
 file = st.file_uploader("Upload CSV", type=["csv"])
 
@@ -214,7 +204,7 @@ if file:
         metrics, section_dist = calculate_metrics(df)
         insights = generate_insights(metrics)
 
-        st.subheader("📊 Key Metrics")
+        st.subheader("📊 Metrics")
         st.json(metrics)
 
         st.subheader("💡 Insights")
