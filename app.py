@@ -2,16 +2,21 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from docx import Document
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+from openpyxl.chart import PieChart, Reference
 
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
 
 # -----------------------------
 # Helpers
 # -----------------------------
+
 def normalize_url(url):
     if pd.isna(url):
         return ""
     return str(url).strip().rstrip('/').lower()
+
 
 def auto_map_columns(df):
     df.columns = [col.strip().lower() for col in df.columns]
@@ -40,6 +45,7 @@ def auto_map_columns(df):
 
     return df
 
+
 def classify_section(url):
     if "doctor" in url:
         return "Doctors"
@@ -54,6 +60,7 @@ def classify_section(url):
 # -----------------------------
 # Metrics
 # -----------------------------
+
 def calculate_metrics(df):
     metrics = {}
 
@@ -85,72 +92,91 @@ def calculate_metrics(df):
 # -----------------------------
 # Severity
 # -----------------------------
+
 def get_severity(metric, value):
     if value is None or not isinstance(value, (int, float)):
         return "N/A"
 
     if "Duplicate" in metric:
         return "High" if value > 50 else "Medium" if value > 20 else "Low"
-
     if "Orphan" in metric:
         return "High" if value > 30 else "Medium" if value > 10 else "Low"
-
     if "Depth" in metric:
         return "High" if value > 4 else "Medium" if value > 3 else "Low"
-
     if "Navigation" in metric:
         return "High" if value < 50 else "Medium" if value < 70 else "Low"
 
     return "Low"
 
 # -----------------------------
-# Excel (FULLY FIXED)
+# Excel Dashboard with Visuals
 # -----------------------------
+
 def generate_excel(df, metrics, section_dist):
     output = BytesIO()
 
-    # Safe dashboard creation
     dashboard_rows = []
     for k, v in metrics.items():
-        safe_value = v if v is not None else "N/A"
-        severity = get_severity(k, v)
-        dashboard_rows.append({
-            "Metric": k,
-            "Value": safe_value,
-            "Severity": severity
-        })
+        dashboard_rows.append([k, v if v is not None else "N/A", get_severity(k, v)])
 
-    dashboard_df = pd.DataFrame(dashboard_rows)
+    dashboard_df = pd.DataFrame(dashboard_rows, columns=["Metric", "Value", "Severity"])
 
-    # Safe section df
-    section_df = section_dist.reset_index()
-    section_df.columns = ['Section', 'Percentage']
+    section_df = pd.DataFrame({
+        "Section": section_dist.index.astype(str),
+        "Percentage": section_dist.values
+    })
 
+    # Write initial file
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        dashboard_df.to_excel(writer, 'Dashboard', index=False)
-        section_df.to_excel(writer, 'Sections', index=False)
-        df.to_excel(writer, 'Raw Data', index=False)
+        dashboard_df.to_excel(writer, sheet_name='Dashboard', index=False)
+        section_df.to_excel(writer, sheet_name='Sections', index=False)
+        df.to_excel(writer, sheet_name='Raw Data', index=False)
 
-    return output.getvalue()
+    output.seek(0)
 
-# -----------------------------
-# Word
-# -----------------------------
-def generate_word(metrics):
-    doc = Document()
-    doc.add_heading('IA Audit Report', 0)
+    # Load workbook for styling
+    wb = load_workbook(output)
+    ws = wb['Dashboard']
 
-    for k, v in metrics.items():
-        doc.add_paragraph(f"{k}: {v}")
+    # Color fills
+    red = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    yellow = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 
-    output = BytesIO()
-    doc.save(output)
-    return output.getvalue()
+    # Apply colors
+    for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
+        for cell in row:
+            if cell.value == "High":
+                cell.fill = red
+            elif cell.value == "Medium":
+                cell.fill = yellow
+            elif cell.value == "Low":
+                cell.fill = green
+
+    # Add Pie Chart
+    ws_sections = wb['Sections']
+    pie = PieChart()
+
+    data = Reference(ws_sections, min_col=2, min_row=1, max_row=len(section_df)+1)
+    labels = Reference(ws_sections, min_col=1, min_row=2, max_row=len(section_df)+1)
+
+    pie.add_data(data, titles_from_data=True)
+    pie.set_categories(labels)
+    pie.title = "Section Distribution"
+
+    ws_sections.add_chart(pie, "E2")
+
+    final_output = BytesIO()
+    wb.save(final_output)
+    final_output.seek(0)
+
+    return final_output
 
 # -----------------------------
 # UI
 # -----------------------------
-st.title("📊 IA Audit Tool (Stable Dashboard Version)")
+
+st.title("📊 IA Audit Tool (Visual Dashboard Edition)")
 
 file = st.file_uploader("Upload CSV", type=['csv'])
 
@@ -167,16 +193,12 @@ if file:
         st.dataframe(df)
 
     with tab2:
+        excel_file = generate_excel(df, metrics, section_dist)
         st.download_button(
-            "Download Excel Dashboard",
-            generate_excel(df, metrics, section_dist),
-            "IA_Dashboard.xlsx"
-        )
-
-        st.download_button(
-            "Download Word Report",
-            generate_word(metrics),
-            "IA_Report.docx"
+            "Download Visual Excel Dashboard",
+            data=excel_file,
+            file_name="IA_Dashboard.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
 else:
