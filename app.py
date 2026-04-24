@@ -2,26 +2,32 @@ import streamlit as st
 import pandas as pd
 import requests
 from urllib.parse import urlparse
-from docx import Document
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Advanced IA Audit Tool", layout="wide")
-st.title("Advanced IA Audit Tool (Public Website)")
+st.set_page_config(page_title="IA Audit Tool", layout="wide")
+st.title("IA Audit Tool (Public Website)")
 
 # -------------------------------
-# Safe Import for BeautifulSoup
+# Safe Imports
 # -------------------------------
 BS4_AVAILABLE = True
+DOCX_AVAILABLE = True
+
 try:
     from bs4 import BeautifulSoup
 except ImportError:
     BS4_AVAILABLE = False
 
+try:
+    from docx import Document
+except ImportError:
+    DOCX_AVAILABLE = False
+
 # -------------------------------
 # Inputs
 # -------------------------------
-uploaded_file = st.file_uploader("Upload URL List (CSV/Excel)", type=["csv", "xlsx"])
-sitemap_url = st.text_input("Optional: Enter Sitemap URL")
+uploaded_file = st.file_uploader("Upload URL list (CSV or Excel)", type=["csv", "xlsx"])
+sitemap_url = st.text_input("Optional: Sitemap URL")
 
 # -------------------------------
 # Load File
@@ -51,13 +57,13 @@ def normalize_url_column(df):
 # -------------------------------
 # Sitemap Parser
 # -------------------------------
-def fetch_sitemap_urls(sitemap_url):
+def fetch_sitemap_urls(url):
     try:
-        response = requests.get(sitemap_url, timeout=10)
+        response = requests.get(url, timeout=10)
         root = ET.fromstring(response.content)
         return set([elem.text for elem in root.iter() if "loc" in elem.tag])
     except:
-        st.warning("Unable to fetch or parse sitemap.")
+        st.warning("Unable to fetch sitemap")
         return set()
 
 # -------------------------------
@@ -75,7 +81,7 @@ def enrich_urls(df):
     return df
 
 # -------------------------------
-# HTTP + Title Fetch (Safe)
+# HTTP + Title Fetch
 # -------------------------------
 def fetch_page_data(url):
     try:
@@ -85,7 +91,6 @@ def fetch_page_data(url):
         final_url = response.url
         title = ""
 
-        # Only attempt parsing if bs4 is available
         if BS4_AVAILABLE:
             try:
                 soup = BeautifulSoup(response.text, "lxml")
@@ -97,9 +102,8 @@ def fetch_page_data(url):
 
         return status, final_url, title
 
-    except requests.exceptions.RequestException:
+    except:
         return None, None, None
-
 
 def enrich_http_data(df):
     statuses, finals, titles = [], [], []
@@ -131,18 +135,20 @@ def compute_metrics(df, sitemap_urls):
     duplicates = total - unique
 
     avg_depth = round(df["depth"].mean(), 2)
+    max_depth = df["depth"].max()
+
     section_counts = df["section"].value_counts()
 
-    # Orphan detection
+    # Orphan pages
     if sitemap_urls:
         orphan = sitemap_urls - set(df["URL"])
         orphan_pct = round((len(orphan) / len(sitemap_urls)) * 100, 2)
     else:
         orphan_pct = "N/A"
 
-    # HTTP metrics
+    # HTTP
     broken = df[df["status"] >= 400].shape[0]
-    redirect = df[df["status"].between(300, 399)].shape[0]
+    redirects = df[df["status"].between(300, 399)].shape[0]
 
     # Duplicate titles
     duplicate_titles = df["title"].duplicated().sum() if BS4_AVAILABLE else "N/A"
@@ -152,10 +158,10 @@ def compute_metrics(df, sitemap_urls):
         "Unique Pages": unique,
         "% Duplicate URLs": round((duplicates / total) * 100, 2) if total else 0,
         "Avg Depth": avg_depth,
-        "Max Depth": df["depth"].max(),
+        "Max Depth": max_depth,
         "% Orphan Pages": orphan_pct,
         "Broken Pages": broken,
-        "Redirects": redirect,
+        "Redirects": redirects,
         "Duplicate Titles": duplicate_titles,
         "Top Section": section_counts.idxmax()
     }
@@ -170,9 +176,9 @@ def generate_report(metrics, section_counts):
     doc.add_heading("IA Audit Report", 0)
 
     doc.add_heading("Executive Summary", 1)
-    doc.add_paragraph("Automated IA audit based on publicly accessible website data.")
+    doc.add_paragraph("Automated IA audit based on publicly available website data.")
 
-    doc.add_heading("Metrics", 1)
+    doc.add_heading("Core Metrics", 1)
     for k, v in metrics.items():
         doc.add_paragraph(f"{k}: {v}")
 
@@ -192,7 +198,6 @@ if uploaded_file:
     df = enrich_urls(df)
 
     st.info("Processing URLs... this may take time")
-
     df = enrich_http_data(df)
 
     sitemap_urls = fetch_sitemap_urls(sitemap_url) if sitemap_url else set()
@@ -208,14 +213,17 @@ if uploaded_file:
     st.subheader("Sample Data")
     st.dataframe(df.head())
 
-    # CSV Download
+    # CSV download
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download Full Dataset", csv, "audit_output.csv")
 
     # Word Report
-    doc = generate_report(metrics, section_counts)
-    path = "/mnt/data/IA_Audit_Report.docx"
-    doc.save(path)
+    if DOCX_AVAILABLE:
+        doc = generate_report(metrics, section_counts)
+        path = "/mnt/data/IA_Audit_Report.docx"
+        doc.save(path)
 
-    with open(path, "rb") as f:
-        st.download_button("Download Word Report", f, "IA_Audit_Report.docx")
+        with open(path, "rb") as f:
+            st.download_button("Download Word Report", f, "IA_Audit_Report.docx")
+    else:
+        st.warning("Word report not available (missing python-docx)")
