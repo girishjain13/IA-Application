@@ -15,19 +15,31 @@ def normalize_url(url):
     return str(url).strip().rstrip('/').lower()
 
 
-def standardize_columns(df):
+def auto_map_columns(df):
     df.columns = [col.strip().lower() for col in df.columns]
 
-    column_mapping = {
-        'address': 'url',
-        'page url': 'url',
-        'url address': 'url',
-        'links': 'linked_from'
-    }
+    mapping = {}
 
     for col in df.columns:
-        if col in column_mapping:
-            df.rename(columns={col: column_mapping[col]}, inplace=True)
+        if 'url' in col or 'address' in col:
+            mapping[col] = 'url'
+        elif 'link' in col or 'inlink' in col:
+            mapping[col] = 'linked_from'
+        elif 'nav' in col:
+            mapping[col] = 'in_nav'
+        elif 'depth' in col or 'level' in col:
+            mapping[col] = 'depth'
+        elif 'status' in col or 'code' in col:
+            mapping[col] = 'status'
+        elif 'owner' in col:
+            mapping[col] = 'owner'
+
+    df.rename(columns=mapping, inplace=True)
+
+    # Fallback for URL
+    if 'url' not in df.columns:
+        df.rename(columns={df.columns[0]: 'url'}, inplace=True)
+        st.warning(f"No URL column found. Using '{df.columns[0]}' as URL.")
 
     return df
 
@@ -60,7 +72,7 @@ def calculate_metrics(df):
     section_dist = (df['section'].value_counts(normalize=True)*100).round(2)
 
     if 'in_nav' in df.columns:
-        metrics['% Pages in Navigation'] = round(df['in_nav'].mean()*100, 2)
+        metrics['% Pages in Navigation'] = round(pd.to_numeric(df['in_nav'], errors='coerce').fillna(0).mean()*100, 2)
     else:
         metrics['% Pages in Navigation'] = 'N/A'
 
@@ -75,9 +87,19 @@ def calculate_metrics(df):
         metrics['% Orphan Pages'] = 'N/A'
 
     if 'depth' in df.columns:
-        metrics['Avg Depth'] = round(df['depth'].mean(), 2)
+        metrics['Avg Depth'] = round(pd.to_numeric(df['depth'], errors='coerce').mean(), 2)
     else:
         metrics['Avg Depth'] = 'N/A'
+
+    if 'status' in df.columns:
+        metrics['% Error Pages'] = round((len(df[pd.to_numeric(df['status'], errors='coerce') != 200])/len(df))*100, 2)
+    else:
+        metrics['% Error Pages'] = 'N/A'
+
+    if 'owner' in df.columns:
+        metrics['Pages without Owner'] = len(df[df['owner'].isna()])
+    else:
+        metrics['Pages without Owner'] = 'N/A'
 
     return metrics, section_dist
 
@@ -173,18 +195,14 @@ def generate_word(metrics, insights, recs, section_dist):
 # UI
 # -----------------------------
 
-st.title("📊 IA Audit Tool")
+st.title("📊 IA Audit Tool (Schema-Agnostic)")
 
 file = st.file_uploader("Upload CSV", type=['csv'])
 
 if file:
     df = pd.read_csv(file)
 
-    df = standardize_columns(df)
-
-    if 'url' not in df.columns:
-        st.error("CSV must contain a URL column (url/address/page url).")
-        st.stop()
+    df = auto_map_columns(df)
 
     df['url'] = df['url'].apply(normalize_url)
 
@@ -206,4 +224,4 @@ if file:
         st.download_button("Download Word", generate_word(metrics, insights, recs, section_dist), "IA_Report.docx")
 
 else:
-    st.info("Upload CSV to start")
+    st.info("Upload CSV to start analysis")
