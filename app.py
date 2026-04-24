@@ -6,7 +6,7 @@ from docx import Document
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
 
 # -----------------------------
-# Utility Functions
+# Helpers
 # -----------------------------
 
 def normalize_url(url):
@@ -15,123 +15,156 @@ def normalize_url(url):
     return url.strip().rstrip('/').lower()
 
 
+def classify_section(url):
+    url = url.lower()
+    if "doctor" in url:
+        return "Doctors"
+    elif "service" in url:
+        return "Services"
+    elif "location" in url:
+        return "Locations"
+    elif "blog" in url or "news" in url:
+        return "Content"
+    else:
+        return "Other"
+
+# -----------------------------
+# Metrics Engine
+# -----------------------------
+
 def calculate_metrics(df):
     metrics = {}
 
     metrics['Total Pages'] = len(df)
-    metrics['Unique URLs'] = df['url'].nunique() if 'url' in df.columns else 0
-    metrics['Duplicate Pages %'] = round((1 - metrics['Unique URLs']/metrics['Total Pages'])*100, 2) if metrics['Total Pages'] else 0
+    metrics['Unique URLs'] = df['url'].nunique()
+    metrics['Duplicate Pages %'] = round((1 - metrics['Unique URLs']/metrics['Total Pages'])*100, 2)
 
+    # Sections
+    df['section'] = df['url'].apply(classify_section)
+    section_dist = (df['section'].value_counts(normalize=True)*100).round(2)
+
+    # Navigation
     if 'in_nav' in df.columns:
         metrics['% Pages in Navigation'] = round(df['in_nav'].mean()*100, 2)
         metrics['Pages not in Navigation'] = len(df[df['in_nav'] == False])
     else:
         metrics['% Pages in Navigation'] = 'N/A'
-        metrics['Pages not in Navigation'] = 'N/A'
 
+    # Orphans
     if 'linked_from' in df.columns:
-        all_pages = set(df['url'].apply(normalize_url))
-        linked_pages = set(df['linked_from'].dropna().apply(normalize_url))
+        all_pages = set(df['url'])
+        linked_pages = set(df['linked_from'].dropna())
         orphan_pages = all_pages - linked_pages
         metrics['Orphan Pages'] = len(orphan_pages)
-        metrics['% Orphan Pages'] = round((len(orphan_pages)/len(all_pages))*100, 2) if all_pages else 0
+        metrics['% Orphan Pages'] = round((len(orphan_pages)/len(all_pages))*100, 2)
     else:
         metrics['Orphan Pages'] = 'N/A'
         metrics['% Orphan Pages'] = 'N/A'
 
+    # Depth
     if 'depth' in df.columns:
         metrics['Avg Depth'] = round(df['depth'].mean(), 2)
-        metrics['Max Depth'] = df['depth'].max()
     else:
         metrics['Avg Depth'] = 'N/A'
-        metrics['Max Depth'] = 'N/A'
 
-    if 'status' in df.columns:
-        metrics['% Error Pages'] = round((len(df[df['status'] != 200])/len(df))*100, 2)
-    else:
-        metrics['% Error Pages'] = 'N/A'
+    return metrics, section_dist
 
-    if 'owner' in df.columns:
-        metrics['Pages without Owner'] = len(df[df['owner'].isna()])
-    else:
-        metrics['Pages without Owner'] = 'N/A'
+# -----------------------------
+# Insights Engine
+# -----------------------------
 
-    return metrics
-
-
-def generate_insights(metrics):
+def generate_insights(metrics, section_dist):
     insights = []
 
-    if isinstance(metrics.get('% Orphan Pages'), (int, float)):
-        if metrics['% Orphan Pages'] > 20:
-            insights.append("High orphan pages (>20%). Improve internal linking.")
-        else:
-            insights.append("Orphan pages are under control.")
+    if metrics['Duplicate Pages %'] > 50:
+        insights.append("High duplication driven by structural repetition (likely location-based architecture).")
 
-    if isinstance(metrics.get('Duplicate Pages %'), (int, float)):
-        if metrics['Duplicate Pages %'] > 10:
-            insights.append("Duplicate content is high. Consider consolidation.")
-        else:
-            insights.append("Duplicate content is within acceptable limits.")
+    if isinstance(metrics.get('% Orphan Pages'), (int,float)) and metrics['% Orphan Pages'] > 30:
+        insights.append("Large number of orphan pages indicates weak internal linking.")
 
-    if isinstance(metrics.get('Avg Depth'), (int, float)):
-        if metrics['Avg Depth'] > 4:
-            insights.append("Navigation depth is high. Flatten IA structure.")
-        else:
-            insights.append("Navigation depth is optimal.")
+    if isinstance(metrics.get('Avg Depth'), (int,float)) and metrics['Avg Depth'] > 4:
+        insights.append("Deep navigation increases user effort and reduces discoverability.")
 
-    if isinstance(metrics.get('% Pages in Navigation'), (int, float)):
-        if metrics['% Pages in Navigation'] < 70:
-            insights.append("Low navigation coverage. Improve discoverability.")
+    if isinstance(metrics.get('% Pages in Navigation'), (int,float)) and metrics['% Pages in Navigation'] < 60:
+        insights.append("Low navigation coverage suggests fragmented IA.")
+
+    # Section imbalance
+    if 'Doctors' in section_dist and section_dist['Doctors'] > 40:
+        insights.append("Doctor section dominates IA, indicating duplication across entities.")
 
     return insights
 
+# -----------------------------
+# Recommendations
+# -----------------------------
 
-def generate_excel(df, metrics):
+def generate_recommendations(metrics):
+    recs = []
+
+    if metrics['Duplicate Pages %'] > 50:
+        recs.append("Move to entity-driven architecture (Doctors, Services, Locations).")
+
+    if isinstance(metrics.get('% Orphan Pages'), (int,float)) and metrics['% Orphan Pages'] > 30:
+        recs.append("Improve internal linking and navigation pathways.")
+
+    if isinstance(metrics.get('Avg Depth'), (int,float)) and metrics['Avg Depth'] > 4:
+        recs.append("Flatten navigation to reduce clicks.")
+
+    recs.append("Implement centralized content governance and taxonomy.")
+
+    return recs
+
+# -----------------------------
+# Excel Generator
+# -----------------------------
+
+def generate_excel(df, metrics, insights, recs, section_dist):
     output = BytesIO()
 
-    insights = generate_insights(metrics)
-
-    # Convert metrics & insights to DataFrames
-    metrics_df = pd.DataFrame(list(metrics.items()), columns=['Metric', 'Value'])
-    insights_df = pd.DataFrame(insights, columns=['Insights'])
-
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        
-        # Sheet 1: Executive Summary
-        summary_df = pd.DataFrame({
-            "Section": ["Core Metrics", "Navigation", "Content"],
-            "Details": [
-                f"Total Pages: {metrics.get('Total Pages')} | Duplicate: {metrics.get('Duplicate Pages %')}%",
-                f"Nav Coverage: {metrics.get('% Pages in Navigation')}% | Orphans: {metrics.get('% Orphan Pages')}%",
-                f"Error Pages: {metrics.get('% Error Pages')}% | Missing Owners: {metrics.get('Pages without Owner')}"
-            ]
-        })
-        summary_df.to_excel(writer, sheet_name='Executive Summary', index=False)
 
-        # Sheet 2: Metrics
-        metrics_df.to_excel(writer, sheet_name='Detailed Metrics', index=False)
+        # Summary
+        summary = pd.DataFrame(list(metrics.items()), columns=['Metric','Value'])
+        summary.to_excel(writer, sheet_name='Summary', index=False)
 
-        # Sheet 3: Insights
-        insights_df.to_excel(writer, sheet_name='Insights', index=False)
+        # Section Distribution
+        section_dist.reset_index().rename(columns={'index':'Section','section':'%'}).to_excel(writer, sheet_name='Sections', index=False)
 
-        # Sheet 4: Raw Data (cleaned)
+        # Insights
+        pd.DataFrame(insights, columns=['Insights']).to_excel(writer, sheet_name='Insights', index=False)
+
+        # Recommendations
+        pd.DataFrame(recs, columns=['Recommendations']).to_excel(writer, sheet_name='Recommendations', index=False)
+
+        # Raw
         df.to_excel(writer, sheet_name='Raw Data', index=False)
 
     return output.getvalue()
 
+# -----------------------------
+# Word Generator
+# -----------------------------
 
-def generate_word(metrics):
+def generate_word(metrics, insights, recs, section_dist):
     doc = Document()
-    doc.add_heading('IA Audit Report', 0)
 
-    doc.add_heading('Summary Metrics', level=1)
-    for k, v in metrics.items():
+    doc.add_heading('Website Information Architecture Audit Report', 0)
+
+    doc.add_heading('Core Metrics', 1)
+    for k,v in metrics.items():
         doc.add_paragraph(f"{k}: {v}")
 
-    doc.add_heading('Insights', level=1)
-    for insight in generate_insights(metrics):
-        doc.add_paragraph(insight)
+    doc.add_heading('Section Distribution', 1)
+    for sec, val in section_dist.items():
+        doc.add_paragraph(f"{sec}: {val}%")
+
+    doc.add_heading('Key Insights', 1)
+    for i in insights:
+        doc.add_paragraph(i)
+
+    doc.add_heading('Recommendations', 1)
+    for r in recs:
+        doc.add_paragraph(r)
 
     output = BytesIO()
     doc.save(output)
@@ -141,46 +174,35 @@ def generate_word(metrics):
 # UI
 # -----------------------------
 
-st.title("📊 IA Audit & Reporting Tool")
+st.title("📊 IA Audit Tool (Consulting Grade)")
 
-uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+file = st.file_uploader("Upload CSV", type=['csv'])
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+if file:
+    df = pd.read_csv(file)
 
-    if 'url' in df.columns:
-        df['url'] = df['url'].apply(normalize_url)
+    df['url'] = df['url'].apply(normalize_url)
 
-    metrics = calculate_metrics(df)
+    metrics, section_dist = calculate_metrics(df)
+    insights = generate_insights(metrics, section_dist)
+    recs = generate_recommendations(metrics)
 
-    tab1, tab2, tab3 = st.tabs(["Data","Metrics","Download Reports"])
+    tab1, tab2, tab3 = st.tabs(["Data","Insights","Download"])
 
     with tab1:
         st.dataframe(df)
 
     with tab2:
-        st.subheader("IA Metrics")
-        for k,v in metrics.items():
-            st.write(f"**{k}:** {v}")
+        st.subheader("Insights")
+        for i in insights:
+            st.write("•", i)
 
     with tab3:
-        st.subheader("Download Reports")
+        excel = generate_excel(df, metrics, insights, recs, section_dist)
+        st.download_button("Download Excel", excel, "IA_Report.xlsx")
 
-        excel_file = generate_excel(df, metrics)
-        st.download_button(
-            label="Download Structured Excel Report",
-            data=excel_file,
-            file_name="IA_Audit_Report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-        word_file = generate_word(metrics)
-        st.download_button(
-            label="Download Word Report",
-            data=word_file,
-            file_name="IA_Audit_Report.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
+        word = generate_word(metrics, insights, recs, section_dist)
+        st.download_button("Download Word", word, "IA_Report.docx")
 
 else:
-    st.info("Upload CSV to generate IA audit metrics.")
+    st.info("Upload CSV to start analysis")
