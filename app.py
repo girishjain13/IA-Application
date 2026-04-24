@@ -4,11 +4,12 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.chart import PieChart, Reference
+from docx import Document
 
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
 
 # -----------------------------
-# Helpers
+# HELPERS
 # -----------------------------
 def normalize_url(url):
     if pd.isna(url):
@@ -26,7 +27,7 @@ def auto_map_columns(df):
             mapping[col] = 'linked_from'
         elif 'nav' in col:
             mapping[col] = 'in_nav'
-        elif 'depth' in col or 'level' in col:
+        elif 'depth' in col:
             mapping[col] = 'depth'
 
     df.rename(columns=mapping, inplace=True)
@@ -39,158 +40,150 @@ def auto_map_columns(df):
     return df
 
 # -----------------------------
-# Inference Engine
+# INFERENCE
 # -----------------------------
 def infer_data(df):
-    messages = []
+    msgs = []
 
     if 'depth' not in df.columns:
         df['depth'] = df['url'].apply(lambda x: x.count('/'))
-        messages.append("Depth inferred")
+        msgs.append("Depth inferred")
 
     if 'in_nav' not in df.columns:
-        df['in_nav'] = df['depth'].apply(lambda x: x <= 2)
-        messages.append("Navigation inferred")
+        df['in_nav'] = df['depth'] <= 2
+        msgs.append("Navigation inferred")
 
     if 'linked_from' not in df.columns:
         df['linked_from'] = df['url'].apply(
             lambda x: '/'.join(x.split('/')[:-1]) if '/' in x else None
         )
-        messages.append("Link relationships inferred")
+        msgs.append("Link relationships inferred")
 
-    return df, messages
+    return df, msgs
 
 # -----------------------------
-# Metrics
+# METRICS
 # -----------------------------
 def calculate_metrics(df):
     metrics = {}
 
-    metrics['Total Pages'] = len(df)
-    metrics['Unique URLs'] = df['url'].nunique()
+    total = len(df)
+    unique = df['url'].nunique()
 
-    if metrics['Total Pages'] > 0:
-        metrics['Duplicate Pages %'] = round(
-            (1 - metrics['Unique URLs'] / metrics['Total Pages']) * 100, 2
-        )
-    else:
-        metrics['Duplicate Pages %'] = 0
+    metrics['Total Pages'] = total
+    metrics['Duplicate %'] = round((1 - unique/total)*100,2) if total else 0
+    metrics['Navigation %'] = round(df['in_nav'].astype(int).mean()*100,2)
 
-    # Navigation
-    metrics['% Pages in Navigation'] = round(
-        df['in_nav'].astype(int).mean() * 100, 2
-    )
-
-    # Orphans
     all_pages = set(df['url'])
-    linked_pages = set(df['linked_from'].dropna())
-    orphan_pages = all_pages - linked_pages
+    linked = set(df['linked_from'].dropna())
+    orphan = all_pages - linked
 
-    metrics['% Orphan Pages'] = round(
-        (len(orphan_pages) / len(all_pages)) * 100, 2
-    ) if len(all_pages) > 0 else 0
+    metrics['Orphan %'] = round((len(orphan)/len(all_pages))*100,2) if all_pages else 0
+    metrics['Avg Depth'] = round(df['depth'].mean(),2)
 
-    # Depth
-    metrics['Avg Depth'] = round(df['depth'].mean(), 2)
-
-    # Sections
-    df['section'] = df['url'].apply(
-        lambda x: "Doctors" if "doctor" in x else
+    df['section'] = df['url'].apply(lambda x:
+        "Doctors" if "doctor" in x else
         "Services" if "service" in x else
         "Locations" if "location" in x else
-        "Content" if "blog" in x or "news" in x else
-        "Other"
+        "Content" if "blog" in x else "Other"
     )
 
-    section_dist = (df['section'].value_counts(normalize=True) * 100).round(2)
+    section_dist = (df['section'].value_counts(normalize=True)*100).round(2)
 
     return metrics, section_dist
 
 # -----------------------------
-# Severity
+# INSIGHTS ENGINE
 # -----------------------------
-def get_severity(metric, value):
-    if not isinstance(value, (int, float)):
-        return "N/A"
+def generate_insights(metrics):
+    insights = []
 
-    if "Duplicate" in metric:
-        return "High" if value > 50 else "Medium" if value > 20 else "Low"
-    if "Orphan" in metric:
-        return "High" if value > 30 else "Medium" if value > 10 else "Low"
-    if "Depth" in metric:
-        return "High" if value > 4 else "Medium" if value > 3 else "Low"
-    if "Navigation" in metric:
-        return "High" if value < 50 else "Medium" if value < 70 else "Low"
+    if metrics['Duplicate %'] > 50:
+        insights.append("High duplication indicates structural inefficiencies.")
 
-    return "Low"
+    if metrics['Orphan %'] > 30:
+        insights.append("Large number of orphan pages reduces discoverability.")
+
+    if metrics['Avg Depth'] > 4:
+        insights.append("Deep navigation increases user effort.")
+
+    if metrics['Navigation %'] < 60:
+        insights.append("Low navigation coverage suggests fragmented IA.")
+
+    return insights
 
 # -----------------------------
-# Excel Generator (SAFE)
+# WORD REPORT
+# -----------------------------
+def generate_word(metrics, insights, section_dist):
+    doc = Document()
+
+    doc.add_heading('Website IA Audit Report', 0)
+
+    doc.add_heading('1. Overview', 1)
+    doc.add_paragraph("This report provides an analysis of the website's information architecture.")
+
+    doc.add_heading('2. Core Metrics', 1)
+    for k, v in metrics.items():
+        doc.add_paragraph(f"{k}: {v}")
+
+    doc.add_heading('3. Section Distribution', 1)
+    for sec, val in section_dist.items():
+        doc.add_paragraph(f"{sec}: {val}%")
+
+    doc.add_heading('4. Key Insights', 1)
+    for i in insights:
+        doc.add_paragraph(f"- {i}")
+
+    doc.add_heading('5. Recommendations', 1)
+    doc.add_paragraph("• Reduce duplication via entity-based architecture")
+    doc.add_paragraph("• Improve internal linking")
+    doc.add_paragraph("• Flatten navigation depth")
+    doc.add_paragraph("• Introduce governance model")
+
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# -----------------------------
+# EXCEL
 # -----------------------------
 def generate_excel(df, metrics, section_dist):
-
-    # STEP 1: Write base file
     buffer1 = BytesIO()
 
-    dashboard_data = []
-    for k, v in metrics.items():
-        dashboard_data.append({
-            "Metric": k,
-            "Value": v,
-            "Severity": get_severity(k, v)
-        })
-
-    dashboard_df = pd.DataFrame(dashboard_data)
+    dashboard = pd.DataFrame([
+        {"Metric": k, "Value": v} for k,v in metrics.items()
+    ])
 
     section_df = pd.DataFrame({
-        "Section": section_dist.index.astype(str),
+        "Section": section_dist.index,
         "Percentage": section_dist.values
     })
 
     with pd.ExcelWriter(buffer1, engine='openpyxl') as writer:
-        dashboard_df.to_excel(writer, sheet_name='Dashboard', index=False)
-        section_df.to_excel(writer, sheet_name='Sections', index=False)
-        df.to_excel(writer, sheet_name='Raw Data', index=False)
+        dashboard.to_excel(writer, "Dashboard", index=False)
+        section_df.to_excel(writer, "Sections", index=False)
+        df.to_excel(writer, "Raw Data", index=False)
 
     buffer1.seek(0)
 
-    # STEP 2: Load workbook
     wb = load_workbook(buffer1)
 
-    # Safe styling
-    if 'Dashboard' in wb.sheetnames:
-        ws = wb['Dashboard']
+    # chart
+    if len(section_df) > 0:
+        ws = wb["Sections"]
+        pie = PieChart()
 
-        colors = {
-            "High": PatternFill(start_color="FFC7CE", fill_type="solid"),
-            "Medium": PatternFill(start_color="FFEB9C", fill_type="solid"),
-            "Low": PatternFill(start_color="C6EFCE", fill_type="solid"),
-        }
+        data = Reference(ws, min_col=2, min_row=1, max_row=len(section_df)+1)
+        labels = Reference(ws, min_col=1, min_row=2, max_row=len(section_df)+1)
 
-        for row in ws.iter_rows(min_row=2, min_col=3):
-            for cell in row:
-                if cell.value in colors:
-                    cell.fill = colors[cell.value]
+        pie.add_data(data, titles_from_data=True)
+        pie.set_categories(labels)
+        pie.title = "Section Distribution"
 
-    # Safe chart
-    if 'Sections' in wb.sheetnames and len(section_df) > 0:
-        ws2 = wb['Sections']
+        ws.add_chart(pie, "E2")
 
-        try:
-            pie = PieChart()
-
-            data = Reference(ws2, min_col=2, min_row=1, max_row=len(section_df)+1)
-            labels = Reference(ws2, min_col=1, min_row=2, max_row=len(section_df)+1)
-
-            pie.add_data(data, titles_from_data=True)
-            pie.set_categories(labels)
-            pie.title = "Section Distribution"
-
-            ws2.add_chart(pie, "E2")
-        except:
-            pass  # prevent crash
-
-    # STEP 3: Save final
     buffer2 = BytesIO()
     wb.save(buffer2)
     buffer2.seek(0)
@@ -200,44 +193,50 @@ def generate_excel(df, metrics, section_dist):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("📊 IA Audit Tool (Crash-Proof Version)")
+st.title("📊 IA Audit Tool (Interactive)")
 
-file = st.file_uploader("Upload CSV", type=['csv'])
+file = st.file_uploader("Upload CSV", type=["csv"])
 
 if file:
-    try:
-        df = pd.read_csv(file)
+    df = pd.read_csv(file)
 
-        df = auto_map_columns(df)
-        df['url'] = df['url'].apply(normalize_url)
+    df = auto_map_columns(df)
+    df['url'] = df['url'].apply(normalize_url)
 
-        df, msgs = infer_data(df)
+    df, msgs = infer_data(df)
 
-        if msgs:
-            st.warning(" | ".join(msgs))
+    if msgs:
+        st.warning(" | ".join(msgs))
 
-        metrics, section_dist = calculate_metrics(df)
+    # 🔹 USER INPUT CONTROLS
+    st.sidebar.header("⚙️ Analysis Settings")
+    depth_threshold = st.sidebar.slider("Depth Threshold", 2, 6, 4)
+    orphan_threshold = st.sidebar.slider("Orphan Threshold %", 10, 60, 30)
 
-        tab1, tab2 = st.tabs(["Data", "Download"])
+    metrics, section_dist = calculate_metrics(df)
+    insights = generate_insights(metrics)
 
-        with tab1:
-            st.dataframe(df)
+    # 🔹 DISPLAY METRICS
+    st.subheader("📊 Key Metrics")
+    st.json(metrics)
 
-        with tab2:
-            try:
-                excel_file = generate_excel(df, metrics, section_dist)
+    # 🔹 DISPLAY INSIGHTS
+    st.subheader("💡 Insights")
+    for i in insights:
+        st.write("•", i)
 
-                st.download_button(
-                    "Download Visual Excel Dashboard",
-                    data=excel_file,
-                    file_name="IA_Dashboard.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            except Exception as e:
-                st.error(f"Excel generation failed: {str(e)}")
+    # 🔹 DATA VIEW
+    st.subheader("📄 Data Preview")
+    st.dataframe(df)
 
-    except Exception as e:
-        st.error(f"App error: {str(e)}")
+    # 🔹 DOWNLOADS
+    st.subheader("📥 Download Reports")
+
+    excel = generate_excel(df, metrics, section_dist)
+    st.download_button("Download Excel Dashboard", excel, "IA_Report.xlsx")
+
+    word = generate_word(metrics, insights, section_dist)
+    st.download_button("Download Word Report", word, "IA_Report.docx")
 
 else:
-    st.info("Upload CSV to start analysis")
+    st.info("Upload CSV to begin analysis")
