@@ -1,94 +1,75 @@
 import streamlit as st
 import pandas as pd
 
-st.title("IA Audit Portal")
+st.set_page_config(page_title="URL Audit Tool", layout="wide")
 
-# Upload file
-uploaded_file = st.file_uploader("Upload your URL file (CSV or Excel)", type=["csv", "xlsx"])
+st.title("URL Upload & Normalization")
+
+uploaded_file = st.file_uploader(
+    "Upload your URL file (CSV or Excel)",
+    type=["csv", "xlsx"]
+)
+
+def load_file(file):
+    try:
+        if file.name.endswith(".csv"):
+            return pd.read_csv(file)
+        else:
+            return pd.read_excel(file)
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        st.stop()
+
+def normalize_url_column(df):
+    # Clean column names
+    df.columns = [str(col).strip().lower() for col in df.columns]
+
+    # Common URL column name patterns
+    possible_names = ["url", "urls", "link", "links", "address"]
+
+    # Case 1: Direct match
+    for col in df.columns:
+        if col in possible_names:
+            return df[[col]].rename(columns={col: "URL"})
+
+    # Case 2: Single column file
+    if len(df.columns) == 1:
+        return df.rename(columns={df.columns[0]: "URL"})
+
+    # Case 3: Try detecting column with URLs
+    for col in df.columns:
+        sample_values = df[col].astype(str).head(10)
+        if sample_values.str.contains("http").any():
+            return df[[col]].rename(columns={col: "URL"})
+
+    # Case 4: fallback → take first column
+    st.warning("No explicit URL column found. Using first column as URL.")
+    return df.iloc[:, [0]].rename(columns={df.columns[0]: "URL"})
+
 
 if uploaded_file:
-    # Read file
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    df = load_file(uploaded_file)
 
-    # Ensure column name
-    df.columns = ["URL"]
+    st.write("### Raw Data Preview")
+    st.dataframe(df.head())
 
-    st.subheader("Raw Data")
-    st.write(df.head())
+    df_urls = normalize_url_column(df)
 
-    # -------- PROCESSING -------- #
+    # Final cleanup
+    df_urls["URL"] = df_urls["URL"].astype(str).str.strip()
+    df_urls = df_urls[df_urls["URL"] != ""]
+    df_urls = df_urls.dropna()
 
-    # Normalize URL
-    def normalize(url):
-        url = url.lower()
-        url = url.replace('/en/', '/').replace('/ar/', '/')
-        url = url.replace('.html', '')
-        return url
+    st.write("### Normalized URL Data")
+    st.dataframe(df_urls.head())
 
-    df["Normalized"] = df["URL"].apply(normalize)
+    st.success(f"Successfully processed {len(df_urls)} URLs")
 
-    # Depth
-    df["Depth"] = df["URL"].apply(lambda x: x.count("/") - 2)
-
-    # Page Type
-    def page_type(url):
-        if "services" in url:
-            return "Service"
-        elif "doctor" in url:
-            return "Doctor"
-        elif "about" in url:
-            return "About"
-        elif "search" in url or "thank-you" in url:
-            return "System"
-        else:
-            return "Other"
-
-    df["PageType"] = df["URL"].apply(page_type)
-
-    # Duplicate Key
-    df["DuplicateKey"] = df["Normalized"].apply(lambda x: x.split("/", 2)[-1])
-
-    df["DupCount"] = df.groupby("DuplicateKey")["DuplicateKey"].transform("count")
-
-    # -------- METRICS -------- #
-
-    total_pages = len(df)
-    duplicate_pages = len(df[df["DupCount"] > 1])
-    duplicate_percent = round((duplicate_pages / total_pages) * 100, 2)
-    avg_depth = round(df["Depth"].mean(), 2)
-
-    # Entry points
-    doctor_entries = df[df["URL"].str.contains("find-a-doctor", case=False)].shape[0]
-    service_entries = df[df["URL"].str.contains("services", case=False)].shape[0]
-
-    # -------- DASHBOARD -------- #
-
-    st.subheader("📊 IA Metrics")
-
-    col1, col2 = st.columns(2)
-
-    col1.metric("Total Pages", total_pages)
-    col2.metric("Duplicate %", f"{duplicate_percent}%")
-
-    col1.metric("Avg Depth", avg_depth)
-    col2.metric("Doctor Entry Points", doctor_entries)
-
-    st.metric("Service Entry Points", service_entries)
-
-    # -------- CHARTS -------- #
-
-    st.subheader("Page Type Distribution")
-    st.bar_chart(df["PageType"].value_counts())
-
-    st.subheader("Depth Distribution")
-    st.bar_chart(df["Depth"].value_counts())
-
-    # -------- DOWNLOAD -------- #
-
-    st.subheader("Download Processed Data")
-
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download CSV", csv, "processed_data.csv", "text/csv")
+    # Optional download
+    csv = df_urls.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Cleaned URLs",
+        csv,
+        "cleaned_urls.csv",
+        "text/csv"
+    )
