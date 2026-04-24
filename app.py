@@ -59,11 +59,65 @@ def calculate_metrics(df):
     return metrics
 
 
+def generate_insights(metrics):
+    insights = []
+
+    if isinstance(metrics.get('% Orphan Pages'), (int, float)):
+        if metrics['% Orphan Pages'] > 20:
+            insights.append("High orphan pages (>20%). Improve internal linking.")
+        else:
+            insights.append("Orphan pages are under control.")
+
+    if isinstance(metrics.get('Duplicate Pages %'), (int, float)):
+        if metrics['Duplicate Pages %'] > 10:
+            insights.append("Duplicate content is high. Consider consolidation.")
+        else:
+            insights.append("Duplicate content is within acceptable limits.")
+
+    if isinstance(metrics.get('Avg Depth'), (int, float)):
+        if metrics['Avg Depth'] > 4:
+            insights.append("Navigation depth is high. Flatten IA structure.")
+        else:
+            insights.append("Navigation depth is optimal.")
+
+    if isinstance(metrics.get('% Pages in Navigation'), (int, float)):
+        if metrics['% Pages in Navigation'] < 70:
+            insights.append("Low navigation coverage. Improve discoverability.")
+
+    return insights
+
+
 def generate_excel(df, metrics):
     output = BytesIO()
+
+    insights = generate_insights(metrics)
+
+    # Convert metrics & insights to DataFrames
+    metrics_df = pd.DataFrame(list(metrics.items()), columns=['Metric', 'Value'])
+    insights_df = pd.DataFrame(insights, columns=['Insights'])
+
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        
+        # Sheet 1: Executive Summary
+        summary_df = pd.DataFrame({
+            "Section": ["Core Metrics", "Navigation", "Content"],
+            "Details": [
+                f"Total Pages: {metrics.get('Total Pages')} | Duplicate: {metrics.get('Duplicate Pages %')}%",
+                f"Nav Coverage: {metrics.get('% Pages in Navigation')}% | Orphans: {metrics.get('% Orphan Pages')}%",
+                f"Error Pages: {metrics.get('% Error Pages')}% | Missing Owners: {metrics.get('Pages without Owner')}"
+            ]
+        })
+        summary_df.to_excel(writer, sheet_name='Executive Summary', index=False)
+
+        # Sheet 2: Metrics
+        metrics_df.to_excel(writer, sheet_name='Detailed Metrics', index=False)
+
+        # Sheet 3: Insights
+        insights_df.to_excel(writer, sheet_name='Insights', index=False)
+
+        # Sheet 4: Raw Data (cleaned)
         df.to_excel(writer, sheet_name='Raw Data', index=False)
-        pd.DataFrame(list(metrics.items()), columns=['Metric','Value']).to_excel(writer, sheet_name='Summary', index=False)
+
     return output.getvalue()
 
 
@@ -76,15 +130,8 @@ def generate_word(metrics):
         doc.add_paragraph(f"{k}: {v}")
 
     doc.add_heading('Insights', level=1)
-
-    if isinstance(metrics.get('% Orphan Pages'), (int, float)) and metrics['% Orphan Pages'] > 20:
-        doc.add_paragraph('High number of orphan pages detected. Improve internal linking.')
-
-    if isinstance(metrics.get('Duplicate Pages %'), (int, float)) and metrics['Duplicate Pages %'] > 10:
-        doc.add_paragraph('Significant duplicate content detected. Consider content consolidation.')
-
-    if isinstance(metrics.get('Avg Depth'), (int, float)) and metrics['Avg Depth'] > 4:
-        doc.add_paragraph('Navigation depth is high. Simplify navigation structure.')
+    for insight in generate_insights(metrics):
+        doc.add_paragraph(insight)
 
     output = BytesIO()
     doc.save(output)
@@ -121,7 +168,7 @@ if uploaded_file:
 
         excel_file = generate_excel(df, metrics)
         st.download_button(
-            label="Download Excel Report",
+            label="Download Structured Excel Report",
             data=excel_file,
             file_name="IA_Audit_Report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
