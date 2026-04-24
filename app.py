@@ -3,9 +3,10 @@ import pandas as pd
 import requests
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
-st.title("IA Audit Tool (Public Website)")
+st.title("IA Audit Tool (Fast + Parallel)")
 
 # -------------------------------
 # Safe Imports
@@ -81,11 +82,15 @@ def enrich_urls(df):
     return df
 
 # -------------------------------
-# HTTP + Title Fetch
+# HTTP Fetch (with headers)
 # -------------------------------
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; IA-Audit-Bot/1.0)"
+}
+
 def fetch_page_data(url):
     try:
-        response = requests.get(url, timeout=5, allow_redirects=True)
+        response = requests.get(url, timeout=5, headers=HEADERS, allow_redirects=True)
 
         status = response.status_code
         final_url = response.url
@@ -105,20 +110,34 @@ def fetch_page_data(url):
     except:
         return None, None, None
 
+# -------------------------------
+# 🚀 Parallel Processing
+# -------------------------------
 def enrich_http_data(df):
-    statuses, finals, titles = [], [], []
+    urls = df["URL"].tolist()
+
+    statuses = [None] * len(urls)
+    finals = [None] * len(urls)
+    titles = [""] * len(urls)
 
     progress = st.progress(0)
-    total = len(df)
 
-    for i, url in enumerate(df["URL"]):
-        status, final_url, title = fetch_page_data(url)
+    def worker(idx, url):
+        return idx, fetch_page_data(url)
 
-        statuses.append(status)
-        finals.append(final_url)
-        titles.append(title)
+    MAX_WORKERS = min(20, len(urls))  # safe limit
 
-        progress.progress((i + 1) / total)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(worker, i, url) for i, url in enumerate(urls)]
+
+        for i, future in enumerate(as_completed(futures)):
+            idx, (status, final_url, title) = future.result()
+
+            statuses[idx] = status
+            finals[idx] = final_url
+            titles[idx] = title
+
+            progress.progress((i + 1) / len(urls))
 
     df["status"] = statuses
     df["final_url"] = finals
@@ -146,11 +165,10 @@ def compute_metrics(df, sitemap_urls):
     else:
         orphan_pct = "N/A"
 
-    # HTTP
+    # HTTP metrics
     broken = df[df["status"] >= 400].shape[0]
     redirects = df[df["status"].between(300, 399)].shape[0]
 
-    # Duplicate titles
     duplicate_titles = df["title"].duplicated().sum() if BS4_AVAILABLE else "N/A"
 
     metrics = {
@@ -176,7 +194,7 @@ def generate_report(metrics, section_counts):
     doc.add_heading("IA Audit Report", 0)
 
     doc.add_heading("Executive Summary", 1)
-    doc.add_paragraph("Automated IA audit based on publicly available website data.")
+    doc.add_paragraph("Automated IA audit using publicly available data.")
 
     doc.add_heading("Core Metrics", 1)
     for k, v in metrics.items():
@@ -197,7 +215,8 @@ if uploaded_file:
 
     df = enrich_urls(df)
 
-    st.info("Processing URLs... this may take time")
+    st.info("Processing URLs in parallel...")
+
     df = enrich_http_data(df)
 
     sitemap_urls = fetch_sitemap_urls(sitemap_url) if sitemap_url else set()
