@@ -1,97 +1,204 @@
 import streamlit as st
 import pandas as pd
+import requests
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from docx import Document
+import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="URL Audit Tool", layout="wide")
-
-st.title("URL Upload & Normalization Tool")
-
-uploaded_file = st.file_uploader(
-    "Upload your URL file (CSV or Excel)",
-    type=["csv", "xlsx"]
-)
+st.set_page_config(page_title="Advanced IA Audit Tool", layout="wide")
+st.title("Advanced IA Audit Tool (Public Website)")
 
 # -------------------------------
-# File Loader (Handles Excel issue)
+# Inputs
+# -------------------------------
+uploaded_file = st.file_uploader("Upload URL List (CSV/Excel)", type=["csv", "xlsx"])
+sitemap_url = st.text_input("Optional: Enter Sitemap URL")
+
+# -------------------------------
+# Load File
 # -------------------------------
 def load_file(file):
-    try:
-        if file.name.endswith(".csv"):
-            return pd.read_csv(file)
-
-        elif file.name.endswith(".xlsx"):
-            try:
-                return pd.read_excel(file, engine="openpyxl")
-            except ImportError:
-                st.error(
-                    "Excel support is not enabled (missing 'openpyxl'). "
-                    "Please upload a CSV file or update requirements.txt."
-                )
-                st.stop()
-
-        else:
-            st.error("Unsupported file format. Please upload CSV or Excel.")
-            st.stop()
-
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        st.stop()
-
+    if file.name.endswith(".csv"):
+        return pd.read_csv(file)
+    else:
+        return pd.read_excel(file, engine="openpyxl")
 
 # -------------------------------
-# URL Column Normalization
+# Normalize URL Column
 # -------------------------------
 def normalize_url_column(df):
-    # Clean column names
-    df.columns = [str(col).strip().lower() for col in df.columns]
+    df.columns = [str(c).strip().lower() for c in df.columns]
 
-    possible_names = ["url", "urls", "link", "links", "address"]
-
-    # Case 1: Exact match
     for col in df.columns:
-        if col in possible_names:
+        if col in ["url", "link"]:
             return df[[col]].rename(columns={col: "URL"})
 
-    # Case 2: Single column file
-    if len(df.columns) == 1:
-        return df.rename(columns={df.columns[0]: "URL"})
-
-    # Case 3: Detect URL-like content
-    for col in df.columns:
-        sample = df[col].astype(str).head(10)
-        if sample.str.contains("http", case=False, na=False).any():
-            return df[[col]].rename(columns={col: "URL"})
-
-    # Case 4: Fallback
-    st.warning("No URL column detected. Using first column as URL.")
     return df.iloc[:, [0]].rename(columns={df.columns[0]: "URL"})
 
+# -------------------------------
+# Sitemap Parser
+# -------------------------------
+def fetch_sitemap_urls(sitemap_url):
+    try:
+        response = requests.get(sitemap_url, timeout=10)
+        root = ET.fromstring(response.content)
+
+        urls = [elem.text for elem in root.iter() if "loc" in elem.tag]
+        return set(urls)
+    except:
+        return set()
 
 # -------------------------------
-# Main Execution
+# URL Enrichment
+# -------------------------------
+def enrich_urls(df):
+    df["URL"] = df["URL"].astype(str)
+
+    df["path"] = df["URL"].apply(lambda x: urlparse(x).path)
+    df["depth"] = df["path"].apply(lambda x: len([p for p in x.split("/") if p]))
+    df["section"] = df["path"].apply(
+        lambda x: x.split("/")[1] if len(x.split("/")) > 1 else "root"
+    )
+
+    return df
+
+# -------------------------------
+# HTTP + Title Fetch
+# -------------------------------
+def fetch_page_data(url):
+    try:
+        response = requests.get(url, timeout=5)
+
+        status = response.status_code
+        final_url = response.url
+
+        soup = BeautifulSoup(response.text, "lxml")
+        title = soup.title.string.strip() if soup.title else ""
+
+        return status, final_url, title
+    except:
+        return None, None, None
+
+def enrich_http_data(df):
+    statuses = []
+    finals = []
+    titles = []
+
+    for url in df["URL"]:
+        status, final_url, title = fetch_page_data(url)
+        statuses.append(status)
+        finals.append(final_url)
+        titles.append(title)
+
+    df["status"] = statuses
+    df["final_url"] = finals
+    df["title"] = titles
+
+    return df
+
+# -------------------------------
+# Metrics
+# -------------------------------
+def compute_metrics(df, sitemap_urls):
+    total = len(df)
+    unique = df["URL"].nunique()
+    duplicates = total - unique
+
+    avg_depth = round(df["depth"].mean(), 2)
+
+    section_counts = df["section"].value_counts()
+
+    # Orphan detection
+    if sitemap_urls:
+        uploaded_set = set(df["URL"])
+        orphan_pages = sitemap_urls - uploaded_set
+        orphan_pct = round((len(orphan_pages) / len(sitemap_urls)) * 100, 2)
+    else:
+        orphan_pct = "N/A"
+
+    # HTTP health
+    broken = df[df["status"] >= 400].shape[0]
+    redirect = df[df["status"].between(300, 399)].shape[0]
+
+    # Duplicate titles
+    duplicate_titles = df["title"].duplicated().sum()
+
+    metrics = {
+        "Total Pages": total,
+        "Unique Pages": unique,
+        "% Duplicate URLs": round((duplicates / total) * 100, 2) if total else 0,
+
+        "Avg Depth": avg_depth,
+        "Max Depth": df["depth"].max(),
+
+        "% Orphan Pages": orphan_pct,
+
+        "Broken Pages": broken,
+        "Redirects": redirect,
+
+        "Duplicate Titles": int(duplicate_titles),
+        "Top Section": section_counts.idxmax()
+    }
+
+    return metrics, section_counts
+
+# -------------------------------
+# Word Report
+# -------------------------------
+def generate_report(metrics, section_counts):
+    doc = Document()
+    doc.add_heading("IA Audit Report", 0)
+
+    doc.add_heading("Executive Summary", 1)
+    doc.add_paragraph(
+        "This report provides an overview of the site's Information Architecture based on publicly accessible data."
+    )
+
+    doc.add_heading("Core Metrics", 1)
+    for k, v in metrics.items():
+        doc.add_paragraph(f"{k}: {v}")
+
+    doc.add_heading("Section Distribution", 1)
+    for section, count in section_counts.items():
+        doc.add_paragraph(f"{section}: {count}")
+
+    return doc
+
+# -------------------------------
+# Main Flow
 # -------------------------------
 if uploaded_file:
     df = load_file(uploaded_file)
+    df = normalize_url_column(df)
+    df = df.dropna()
 
-    st.subheader("Raw Data Preview")
+    df = enrich_urls(df)
+
+    st.write("Fetching page data (this may take time)...")
+    df = enrich_http_data(df)
+
+    sitemap_urls = fetch_sitemap_urls(sitemap_url) if sitemap_url else set()
+
+    metrics, section_counts = compute_metrics(df, sitemap_urls)
+
+    st.subheader("Metrics")
+    st.json(metrics)
+
+    st.subheader("Section Distribution")
+    st.bar_chart(section_counts)
+
+    st.subheader("Sample Data")
     st.dataframe(df.head())
 
-    df_urls = normalize_url_column(df)
+    # Download CSV
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button("Download Full Dataset", csv, "audit_output.csv")
 
-    # Clean URLs
-    df_urls["URL"] = df_urls["URL"].astype(str).str.strip()
-    df_urls = df_urls[df_urls["URL"] != ""]
-    df_urls = df_urls.dropna()
+    # Word Report
+    doc = generate_report(metrics, section_counts)
+    path = "/mnt/data/IA_Audit_Report.docx"
+    doc.save(path)
 
-    st.subheader("Normalized URL Data")
-    st.dataframe(df_urls.head())
-
-    st.success(f"Processed {len(df_urls)} URLs successfully")
-
-    # Download cleaned file
-    csv = df_urls.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download Cleaned URLs",
-        csv,
-        "cleaned_urls.csv",
-        "text/csv"
-    )
+    with open(path, "rb") as f:
+        st.download_button("Download Word Report", f, "IA_Audit_Report.docx")
