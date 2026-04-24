@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import pandas as pd
+import time
 
 st.set_page_config(page_title="Website Audit Tool", layout="wide")
 
@@ -23,6 +24,7 @@ def crawl_site(start_url, max_pages=50):
     domain = urlparse(start_url).netloc
 
     progress = st.progress(0)
+    status_text = st.empty()
 
     while to_visit and len(visited) < max_pages:
         url = to_visit.pop(0)
@@ -31,8 +33,14 @@ def crawl_site(start_url, max_pages=50):
         if url in visited:
             continue
 
+        status_text.text(f"Crawling: {url}")
+
         try:
-            response = requests.get(url, timeout=5)
+            headers = {
+                "User-Agent": "Mozilla/5.0"
+            }
+
+            response = requests.get(url, timeout=10, headers=headers)
             visited.add(url)
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -44,7 +52,9 @@ def crawl_site(start_url, max_pages=50):
 
                 if parsed.netloc == domain:
                     clean_link = normalize_url(link)
-                    links.append(clean_link)
+
+                    if clean_link not in links:
+                        links.append(clean_link)
 
                     if clean_link not in visited and clean_link not in to_visit:
                         to_visit.append(clean_link)
@@ -69,6 +79,9 @@ def crawl_site(start_url, max_pages=50):
             })
 
         progress.progress(len(visited) / max_pages)
+        time.sleep(0.5)  # prevent aggressive crawling
+
+    status_text.text("Crawling complete")
 
     return pd.DataFrame(data)
 
@@ -95,7 +108,7 @@ with st.sidebar:
     max_pages = st.slider("Max Pages to Crawl", 10, 200, 50)
     start_crawl = st.button("Start Crawl")
 
-# Session state to persist data
+# Session state
 if "data" not in st.session_state:
     st.session_state.data = None
 
@@ -104,10 +117,13 @@ if "data" not in st.session_state:
 # -----------------------------
 
 if start_crawl and start_url:
-    with st.spinner("Crawling website..."):
-        df = crawl_site(start_url, max_pages)
-        st.session_state.data = df
-    st.success("Crawl completed!")
+    if not start_url.startswith("http"):
+        st.error("Please enter a valid URL starting with http or https")
+    else:
+        with st.spinner("Crawling website..."):
+            df = crawl_site(start_url, max_pages)
+            st.session_state.data = df
+        st.success("Crawl completed!")
 
 # -----------------------------
 # Tabs
@@ -118,16 +134,12 @@ if st.session_state.data is not None:
 
     tab1, tab2, tab3, tab4 = st.tabs(["Crawled Data", "Reports", "Orphan Pages", "Errors"])
 
-    # -------------------------
-    # Tab 1: Data
-    # -------------------------
+    # Tab 1
     with tab1:
         st.subheader("Crawled Pages")
         st.dataframe(df)
 
-    # -------------------------
-    # Tab 2: Reports
-    # -------------------------
+    # Tab 2
     with tab2:
         st.subheader("Summary Report")
 
@@ -141,9 +153,7 @@ if st.session_state.data is not None:
         col2.metric("Error Pages", error_pages)
         col3.metric("Avg Internal Links", round(avg_links, 2) if not pd.isna(avg_links) else 0)
 
-    # -------------------------
-    # Tab 3: Orphans
-    # -------------------------
+    # Tab 3
     with tab3:
         st.subheader("Orphan Pages")
 
@@ -157,9 +167,7 @@ if st.session_state.data is not None:
         else:
             st.info("No orphan pages detected")
 
-    # -------------------------
-    # Tab 4: Errors
-    # -------------------------
+    # Tab 4
     with tab4:
         st.subheader("Error Pages")
 
