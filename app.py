@@ -4,9 +4,10 @@ import requests
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
 
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
-st.title("IA Audit Tool (Fast + Parallel)")
+st.title("IA Audit Tool (Client Report Ready)")
 
 # -------------------------------
 # Safe Imports
@@ -30,219 +31,159 @@ except ImportError:
 uploaded_file = st.file_uploader("Upload URL list (CSV or Excel)", type=["csv", "xlsx"])
 sitemap_url = st.text_input("Optional: Sitemap URL")
 
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
 # -------------------------------
-# Load File
+# Load + Normalize
 # -------------------------------
 def load_file(file):
-    try:
-        if file.name.endswith(".csv"):
-            return pd.read_csv(file)
-        else:
-            return pd.read_excel(file, engine="openpyxl")
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        st.stop()
+    return pd.read_csv(file) if file.name.endswith(".csv") else pd.read_excel(file)
 
-# -------------------------------
-# Normalize URL Column
-# -------------------------------
-def normalize_url_column(df):
-    df.columns = [str(c).strip().lower() for c in df.columns]
-
+def normalize(df):
+    df.columns = [str(c).lower() for c in df.columns]
     for col in df.columns:
         if col in ["url", "link"]:
             return df[[col]].rename(columns={col: "URL"})
-
     return df.iloc[:, [0]].rename(columns={df.columns[0]: "URL"})
 
 # -------------------------------
-# Sitemap Parser
+# Enrich URLs
 # -------------------------------
-def fetch_sitemap_urls(url):
-    try:
-        response = requests.get(url, timeout=10)
-        root = ET.fromstring(response.content)
-        return set([elem.text for elem in root.iter() if "loc" in elem.tag])
-    except:
-        st.warning("Unable to fetch sitemap")
-        return set()
-
-# -------------------------------
-# URL Enrichment
-# -------------------------------
-def enrich_urls(df):
-    df["URL"] = df["URL"].astype(str)
-
+def enrich(df):
     df["path"] = df["URL"].apply(lambda x: urlparse(x).path)
     df["depth"] = df["path"].apply(lambda x: len([p for p in x.split("/") if p]))
     df["section"] = df["path"].apply(
         lambda x: x.split("/")[1] if len(x.split("/")) > 1 else "root"
     )
-
     return df
 
 # -------------------------------
-# HTTP Fetch (with headers)
+# Fetch Data (Parallel)
 # -------------------------------
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; IA-Audit-Bot/1.0)"
-}
-
-def fetch_page_data(url):
+def fetch(url):
     try:
-        response = requests.get(url, timeout=5, headers=HEADERS, allow_redirects=True)
-
-        status = response.status_code
-        final_url = response.url
+        r = requests.get(url, timeout=5, headers=HEADERS)
         title = ""
-
         if BS4_AVAILABLE:
-            try:
-                soup = BeautifulSoup(response.text, "lxml")
-            except:
-                soup = BeautifulSoup(response.text, "html.parser")
-
-            if soup.title and soup.title.string:
-                title = soup.title.string.strip()
-
-        return status, final_url, title
-
+            soup = BeautifulSoup(r.text, "lxml")
+            title = soup.title.string.strip() if soup.title else ""
+        return r.status_code, r.url, title
     except:
-        return None, None, None
+        return None, None, ""
 
-# -------------------------------
-# 🚀 Parallel Processing
-# -------------------------------
-def enrich_http_data(df):
+def crawl(df):
     urls = df["URL"].tolist()
-
-    statuses = [None] * len(urls)
-    finals = [None] * len(urls)
-    titles = [""] * len(urls)
+    status, final, title = [None]*len(urls), [None]*len(urls), [""]*len(urls)
 
     progress = st.progress(0)
+    with ThreadPoolExecutor(max_workers=20) as exe:
+        futures = {exe.submit(fetch, u): i for i, u in enumerate(urls)}
 
-    def worker(idx, url):
-        return idx, fetch_page_data(url)
+        for i, f in enumerate(as_completed(futures)):
+            idx = futures[f]
+            s, fu, t = f.result()
+            status[idx], final[idx], title[idx] = s, fu, t
+            progress.progress((i+1)/len(urls))
 
-    MAX_WORKERS = min(20, len(urls))  # safe limit
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(worker, i, url) for i, url in enumerate(urls)]
-
-        for i, future in enumerate(as_completed(futures)):
-            idx, (status, final_url, title) = future.result()
-
-            statuses[idx] = status
-            finals[idx] = final_url
-            titles[idx] = title
-
-            progress.progress((i + 1) / len(urls))
-
-    df["status"] = statuses
-    df["final_url"] = finals
-    df["title"] = titles
-
+    df["status"], df["final_url"], df["title"] = status, final, title
     return df
+
+# -------------------------------
+# Sitemap
+# -------------------------------
+def get_sitemap(url):
+    try:
+        r = requests.get(url)
+        root = ET.fromstring(r.content)
+        return set([e.text for e in root.iter() if "loc" in e.tag])
+    except:
+        return set()
 
 # -------------------------------
 # Metrics
 # -------------------------------
-def compute_metrics(df, sitemap_urls):
+def metrics(df, sitemap):
     total = len(df)
-    unique = df["URL"].nunique()
-    duplicates = total - unique
+    dup = total - df["URL"].nunique()
 
-    avg_depth = round(df["depth"].mean(), 2)
-    max_depth = df["depth"].max()
+    sections = df["section"].value_counts()
 
-    section_counts = df["section"].value_counts()
-
-    # Orphan pages
-    if sitemap_urls:
-        orphan = sitemap_urls - set(df["URL"])
-        orphan_pct = round((len(orphan) / len(sitemap_urls)) * 100, 2)
-    else:
-        orphan_pct = "N/A"
-
-    # HTTP metrics
-    broken = df[df["status"] >= 400].shape[0]
-    redirects = df[df["status"].between(300, 399)].shape[0]
-
-    duplicate_titles = df["title"].duplicated().sum() if BS4_AVAILABLE else "N/A"
-
-    metrics = {
+    return {
         "Total Pages": total,
-        "Unique Pages": unique,
-        "% Duplicate URLs": round((duplicates / total) * 100, 2) if total else 0,
-        "Avg Depth": avg_depth,
-        "Max Depth": max_depth,
-        "% Orphan Pages": orphan_pct,
-        "Broken Pages": broken,
-        "Redirects": redirects,
-        "Duplicate Titles": duplicate_titles,
-        "Top Section": section_counts.idxmax()
-    }
-
-    return metrics, section_counts
+        "% Duplicate": round((dup/total)*100,2) if total else 0,
+        "Avg Depth": round(df["depth"].mean(),2),
+        "Max Depth": df["depth"].max(),
+        "Broken Pages": df[df["status"]>=400].shape[0],
+        "Redirects": df[df["status"].between(300,399)].shape[0],
+        "Duplicate Titles": df["title"].duplicated().sum(),
+        "% Orphan Pages": (
+            round(len(sitemap - set(df["URL"])) / len(sitemap) * 100,2)
+            if sitemap else "N/A"
+        )
+    }, sections
 
 # -------------------------------
-# Word Report
+# 📄 Word Report
 # -------------------------------
-def generate_report(metrics, section_counts):
+def build_word(metrics, sections):
     doc = Document()
     doc.add_heading("IA Audit Report", 0)
 
     doc.add_heading("Executive Summary", 1)
-    doc.add_paragraph("Automated IA audit using publicly available data.")
+    doc.add_paragraph("Automated IA audit using publicly accessible data.")
 
-    doc.add_heading("Core Metrics", 1)
-    for k, v in metrics.items():
+    doc.add_heading("Key Metrics", 1)
+    for k,v in metrics.items():
         doc.add_paragraph(f"{k}: {v}")
 
     doc.add_heading("Section Distribution", 1)
-    for section, count in section_counts.items():
-        doc.add_paragraph(f"{section}: {count}")
+    for s,c in sections.items():
+        doc.add_paragraph(f"{s}: {c}")
 
-    return doc
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
 
 # -------------------------------
-# Main Flow
+# 📊 Excel Report
+# -------------------------------
+def build_excel(df, metrics, sections):
+    buffer = BytesIO()
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Raw Data", index=False)
+        pd.DataFrame(metrics.items(), columns=["Metric","Value"]).to_excel(writer, sheet_name="Metrics", index=False)
+        sections.to_frame("Count").to_excel(writer, sheet_name="Sections")
+
+    buffer.seek(0)
+    return buffer
+
+# -------------------------------
+# Main
 # -------------------------------
 if uploaded_file:
-    df = load_file(uploaded_file)
-    df = normalize_url_column(df).dropna()
+    df = normalize(load_file(uploaded_file)).dropna()
+    df = enrich(df)
 
-    df = enrich_urls(df)
+    st.info("Running fast crawl...")
+    df = crawl(df)
 
-    st.info("Processing URLs in parallel...")
-
-    df = enrich_http_data(df)
-
-    sitemap_urls = fetch_sitemap_urls(sitemap_url) if sitemap_url else set()
-
-    metrics, section_counts = compute_metrics(df, sitemap_urls)
+    sitemap = get_sitemap(sitemap_url) if sitemap_url else set()
+    m, sections = metrics(df, sitemap)
 
     st.subheader("Metrics")
-    st.json(metrics)
+    st.json(m)
 
-    st.subheader("Section Distribution")
-    st.bar_chart(section_counts)
+    st.bar_chart(sections)
 
-    st.subheader("Sample Data")
-    st.dataframe(df.head())
+    # Excel
+    excel_file = build_excel(df, m, sections)
+    st.download_button("Download Excel Report", excel_file, "IA_Report.xlsx")
 
-    # CSV download
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download Full Dataset", csv, "audit_output.csv")
-
-    # Word Report
+    # Word
     if DOCX_AVAILABLE:
-        doc = generate_report(metrics, section_counts)
-        path = "/mnt/data/IA_Audit_Report.docx"
-        doc.save(path)
-
-        with open(path, "rb") as f:
-            st.download_button("Download Word Report", f, "IA_Audit_Report.docx")
+        word_file = build_word(m, sections)
+        st.download_button("Download Word Report", word_file, "IA_Report.docx")
     else:
-        st.warning("Word report not available (missing python-docx)")
+        st.warning("Word report unavailable (install python-docx)")
