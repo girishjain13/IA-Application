@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-from openpyxl import load_workbook
-from openpyxl.chart import PieChart, Reference
 from docx import Document
 
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
@@ -42,23 +40,23 @@ def auto_map_columns(df):
 # INFERENCE ENGINE
 # -----------------------------
 def infer_data(df):
-    messages = []
+    msgs = []
 
     if 'depth' not in df.columns:
         df['depth'] = df['url'].apply(lambda x: x.count('/'))
-        messages.append("Depth inferred")
+        msgs.append("Depth inferred from URL")
 
     if 'in_nav' not in df.columns:
         df['in_nav'] = df['depth'] <= 2
-        messages.append("Navigation inferred")
+        msgs.append("Navigation inferred from depth")
 
     if 'linked_from' not in df.columns:
         df['linked_from'] = df['url'].apply(
             lambda x: '/'.join(x.split('/')[:-1]) if '/' in x else None
         )
-        messages.append("Link relationships inferred")
+        msgs.append("Link relationships inferred")
 
-    return df, messages
+    return df, msgs
 
 # -----------------------------
 # METRICS
@@ -70,17 +68,18 @@ def calculate_metrics(df):
     unique = df['url'].nunique()
 
     metrics['Total Pages'] = total
-    metrics['Duplicate %'] = round((1 - unique/total)*100,2) if total else 0
-    metrics['Navigation %'] = round(df['in_nav'].astype(int).mean()*100,2)
+    metrics['Duplicate Pages %'] = round((1 - unique/total)*100, 2) if total else 0
+
+    metrics['% Pages in Navigation'] = round(df['in_nav'].astype(int).mean()*100, 2)
 
     all_pages = set(df['url'])
     linked = set(df['linked_from'].dropna())
     orphan = all_pages - linked
 
-    metrics['Orphan %'] = round((len(orphan)/len(all_pages))*100,2) if all_pages else 0
-    metrics['Avg Depth'] = round(df['depth'].mean(),2)
+    metrics['% Orphan Pages'] = round((len(orphan)/len(all_pages))*100, 2) if all_pages else 0
 
-    # Section classification
+    metrics['Avg Depth'] = round(df['depth'].mean(), 2)
+
     df['section'] = df['url'].apply(lambda x:
         "Doctors" if "doctor" in x else
         "Services" if "service" in x else
@@ -94,22 +93,25 @@ def calculate_metrics(df):
     return metrics, section_dist
 
 # -----------------------------
-# INSIGHTS ENGINE
+# INSIGHTS
 # -----------------------------
 def generate_insights(metrics):
     insights = []
 
-    if metrics['Duplicate %'] > 50:
-        insights.append("High duplication indicates structural inefficiencies.")
+    if metrics['Duplicate Pages %'] > 50:
+        insights.append("High duplication indicates inefficient content structure.")
 
-    if metrics['Orphan %'] > 30:
+    if metrics['% Orphan Pages'] > 30:
         insights.append("Large number of orphan pages reduces discoverability.")
 
     if metrics['Avg Depth'] > 4:
         insights.append("Deep navigation increases user effort.")
 
-    if metrics['Navigation %'] < 60:
-        insights.append("Low navigation coverage suggests fragmented IA.")
+    if metrics['% Pages in Navigation'] < 60:
+        insights.append("Low navigation coverage indicates fragmented IA.")
+
+    if not insights:
+        insights.append("IA structure appears relatively healthy.")
 
     return insights
 
@@ -122,7 +124,10 @@ def generate_word(metrics, insights, section_dist):
     doc.add_heading('Website IA Audit Report', 0)
 
     doc.add_heading('1. Overview', 1)
-    doc.add_paragraph("This report provides an analysis of the website's information architecture.")
+    doc.add_paragraph(
+        "This report evaluates the website's information architecture "
+        "based on structure, navigation, and content distribution."
+    )
 
     doc.add_heading('2. Core Metrics', 1)
     for k, v in metrics.items():
@@ -134,13 +139,13 @@ def generate_word(metrics, insights, section_dist):
 
     doc.add_heading('4. Key Insights', 1)
     for i in insights:
-        doc.add_paragraph(f"- {i}")
+        doc.add_paragraph(f"• {i}")
 
     doc.add_heading('5. Recommendations', 1)
-    doc.add_paragraph("• Reduce duplication via entity-based architecture")
-    doc.add_paragraph("• Improve internal linking")
-    doc.add_paragraph("• Flatten navigation depth")
-    doc.add_paragraph("• Introduce governance model")
+    doc.add_paragraph("• Reduce duplication through reusable content models")
+    doc.add_paragraph("• Improve internal linking strategy")
+    doc.add_paragraph("• Simplify navigation structure")
+    doc.add_paragraph("• Establish governance and ownership")
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -148,69 +153,49 @@ def generate_word(metrics, insights, section_dist):
     return buffer
 
 # -----------------------------
-# EXCEL (CRASH-PROOF)
+# EXCEL (STABLE)
 # -----------------------------
 def generate_excel(df, metrics, section_dist):
-    buffer1 = BytesIO()
+    output = BytesIO()
 
+    # Safe data
+    if df is None or df.empty:
+        df = pd.DataFrame({"Message": ["No data available"]})
+
+    dashboard_df = pd.DataFrame([
+        {"Metric": str(k), "Value": str(v)}
+        for k, v in metrics.items()
+    ])
+
+    if section_dist is None or len(section_dist) == 0:
+        section_df = pd.DataFrame({
+            "Section": ["No Data"],
+            "Percentage": [0]
+        })
+    else:
+        section_df = pd.DataFrame({
+            "Section": section_dist.index.astype(str),
+            "Percentage": section_dist.values
+        })
+
+    # Write safely
     try:
-        dashboard_df = pd.DataFrame([
-            {"Metric": k, "Value": v} for k, v in metrics.items()
-        ])
-
-        if section_dist is None or len(section_dist) == 0:
-            section_df = pd.DataFrame({"Section": ["No Data"], "Percentage": [0]})
-        else:
-            section_df = pd.DataFrame({
-                "Section": section_dist.index.astype(str),
-                "Percentage": section_dist.values
-            })
-
-        if df.empty:
-            df = pd.DataFrame({"Message": ["No data"]})
-
-        with pd.ExcelWriter(buffer1, engine='openpyxl') as writer:
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
             dashboard_df.to_excel(writer, "Dashboard", index=False)
             section_df.to_excel(writer, "Sections", index=False)
             df.to_excel(writer, "Raw Data", index=False)
-
     except Exception as e:
         fallback = pd.DataFrame({"Error": [str(e)]})
-        with pd.ExcelWriter(buffer1, engine='openpyxl') as writer:
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
             fallback.to_excel(writer, "Error", index=False)
 
-    buffer1.seek(0)
-
-    try:
-        wb = load_workbook(buffer1)
-
-        if "Sections" in wb.sheetnames:
-            ws = wb["Sections"]
-
-            if ws.max_row > 1:
-                pie = PieChart()
-                data = Reference(ws, min_col=2, min_row=1, max_row=ws.max_row)
-                labels = Reference(ws, min_col=1, min_row=2, max_row=ws.max_row)
-
-                pie.add_data(data, titles_from_data=True)
-                pie.set_categories(labels)
-                pie.title = "Section Distribution"
-
-                ws.add_chart(pie, "E2")
-
-        buffer2 = BytesIO()
-        wb.save(buffer2)
-        buffer2.seek(0)
-
-        return buffer2
-
-    except Exception:
-        return buffer1
+    output.seek(0)
+    return output
 
 # -----------------------------
 # UI
 # -----------------------------
-st.title("📊 IA Audit Tool (Final Version)")
+st.title("📊 IA Audit Tool (Stable Version)")
 
 file = st.file_uploader("Upload CSV", type=["csv"])
 
@@ -242,10 +227,19 @@ if file:
         st.subheader("📥 Download Reports")
 
         excel = generate_excel(df, metrics, section_dist)
-        st.download_button("Download Excel Dashboard", excel, "IA_Report.xlsx")
+        st.download_button(
+            "Download Excel Report",
+            data=excel,
+            file_name="IA_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
         word = generate_word(metrics, insights, section_dist)
-        st.download_button("Download Word Report", word, "IA_Report.docx")
+        st.download_button(
+            "Download Word Report",
+            data=word,
+            file_name="IA_Report.docx"
+        )
 
     except Exception as e:
         st.error(f"App error: {str(e)}")
