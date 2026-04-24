@@ -1,8 +1,7 @@
-
-
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from docx import Document
 
 st.set_page_config(page_title="IA Audit Tool", layout="wide")
 
@@ -19,12 +18,10 @@ def normalize_url(url):
 def calculate_metrics(df):
     metrics = {}
 
-    # Core Metrics
     metrics['Total Pages'] = len(df)
     metrics['Unique URLs'] = df['url'].nunique() if 'url' in df.columns else 0
     metrics['Duplicate Pages %'] = round((1 - metrics['Unique URLs']/metrics['Total Pages'])*100, 2) if metrics['Total Pages'] else 0
 
-    # Navigation
     if 'in_nav' in df.columns:
         metrics['% Pages in Navigation'] = round(df['in_nav'].mean()*100, 2)
         metrics['Pages not in Navigation'] = len(df[df['in_nav'] == False])
@@ -32,7 +29,6 @@ def calculate_metrics(df):
         metrics['% Pages in Navigation'] = 'N/A'
         metrics['Pages not in Navigation'] = 'N/A'
 
-    # Orphans
     if 'linked_from' in df.columns:
         all_pages = set(df['url'].apply(normalize_url))
         linked_pages = set(df['linked_from'].dropna().apply(normalize_url))
@@ -43,7 +39,6 @@ def calculate_metrics(df):
         metrics['Orphan Pages'] = 'N/A'
         metrics['% Orphan Pages'] = 'N/A'
 
-    # Depth
     if 'depth' in df.columns:
         metrics['Avg Depth'] = round(df['depth'].mean(), 2)
         metrics['Max Depth'] = df['depth'].max()
@@ -51,7 +46,6 @@ def calculate_metrics(df):
         metrics['Avg Depth'] = 'N/A'
         metrics['Max Depth'] = 'N/A'
 
-    # Content Health
     if 'status' in df.columns:
         metrics['% Error Pages'] = round((len(df[df['status'] != 200])/len(df))*100, 2)
     else:
@@ -73,6 +67,29 @@ def generate_excel(df, metrics):
     return output.getvalue()
 
 
+def generate_word(metrics):
+    doc = Document()
+    doc.add_heading('IA Audit Report', 0)
+
+    doc.add_heading('Summary Metrics', level=1)
+    for k, v in metrics.items():
+        doc.add_paragraph(f"{k}: {v}")
+
+    doc.add_heading('Insights', level=1)
+
+    if isinstance(metrics.get('% Orphan Pages'), (int, float)) and metrics['% Orphan Pages'] > 20:
+        doc.add_paragraph('High number of orphan pages detected. Improve internal linking.')
+
+    if isinstance(metrics.get('Duplicate Pages %'), (int, float)) and metrics['Duplicate Pages %'] > 10:
+        doc.add_paragraph('Significant duplicate content detected. Consider content consolidation.')
+
+    if isinstance(metrics.get('Avg Depth'), (int, float)) and metrics['Avg Depth'] > 4:
+        doc.add_paragraph('Navigation depth is high. Simplify navigation structure.')
+
+    output = BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
 # -----------------------------
 # UI
 # -----------------------------
@@ -91,17 +108,14 @@ if uploaded_file:
 
     tab1, tab2, tab3 = st.tabs(["Data","Metrics","Download Reports"])
 
-    # Data
     with tab1:
         st.dataframe(df)
 
-    # Metrics
     with tab2:
         st.subheader("IA Metrics")
         for k,v in metrics.items():
             st.write(f"**{k}:** {v}")
 
-    # Download
     with tab3:
         st.subheader("Download Reports")
 
@@ -111,6 +125,14 @@ if uploaded_file:
             data=excel_file,
             file_name="IA_Audit_Report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        word_file = generate_word(metrics)
+        st.download_button(
+            label="Download Word Report",
+            data=word_file,
+            file_name="IA_Audit_Report.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 
 else:
